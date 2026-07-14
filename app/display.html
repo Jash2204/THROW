@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>THROW — Display</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;background:#000;overflow:hidden}
+  #oc,#oc2d,#ov{display:block;position:fixed;inset:0;width:100vw;height:100vh}
+  #oc2d{display:none}
+  #ov{pointer-events:none}
+  body.live{cursor:none}
+  body.live #hud{display:none}
+  #hud{
+    position:fixed;left:0;right:0;bottom:0;display:flex;align-items:center;gap:16px;
+    justify-content:center;padding:16px;z-index:9;
+    background:linear-gradient(transparent,rgba(0,0,0,.8));
+  }
+  #badge{color:#ffb020;font:12px ui-monospace,monospace;letter-spacing:.14em}
+  #tip{color:rgba(255,255,255,.5);font:11px ui-monospace,monospace}
+  #fsbtn{
+    padding:10px 24px;border-radius:6px;border:1px solid #8ab320;background:rgba(196,255,46,.12);
+    color:#c4ff2e;font:13px ui-monospace,monospace;letter-spacing:.1em;cursor:pointer;
+  }
+  #fsbtn:hover{background:rgba(196,255,46,.25)}
+  #banner{
+    display:none;position:fixed;top:0;left:0;right:0;z-index:99;
+    background:#2a0d14;border-bottom:1px solid #ff3b6b;color:#ffd9e2;
+    font:12px ui-monospace,monospace;padding:8px 12px;
+  }
+  #waiting{
+    position:fixed;inset:0;display:flex;align-items:center;justify-content:center;
+    flex-direction:column;gap:10px;color:#454d56;font:13px ui-monospace,monospace;
+    letter-spacing:.1em;pointer-events:none;
+  }
+  #waiting.hidden{display:none}
+</style>
+</head>
+<body>
+<canvas id="oc"></canvas>
+<canvas id="oc2d"></canvas>
+<canvas id="ov"></canvas>
+<div id="banner"></div>
+<div id="waiting"><b style="color:#c4ff2e;font-size:16px">THROW DISPLAY</b><span>waiting for the editor tab…</span><span style="font-size:10px">keep the editor tab open — everything you edit there projects here live</span></div>
+<div id="hud">
+  <span id="badge">⧉ DISPLAY</span>
+  <span id="tip">drag this tab's window onto the projector, then fullscreen — edits sync live from the editor</span>
+  <button id="fsbtn">⛶ FULLSCREEN</button>
+</div>
+
+<script src="shared.js"></script>
+<script>
+// ══════════════════════════════════════════════════════════════════
+//  THROW display tab — a pure renderer.
+//  Geometry arrives over BroadcastChannel; media arrives as Blobs and
+//  is decoded/played LOCALLY. This tab owns its own <video> elements,
+//  so it keeps playing no matter what happens to the editor window
+//  (Chrome suspends media in occluded windows — the bug that killed
+//  the old canvas-push design).
+// ══════════════════════════════════════════════════════════════════
+
+const oc   = document.getElementById('oc');    // WebGL canvas (primary renderer)
+const oc2d = document.getElementById('oc2d');  // Canvas2D fallback (unsupported blends / no WebGL)
+const ov   = document.getElementById('ov');    // 2D overlay: placeholders + outlines
+const g2   = oc2d.getContext('2d');
+const og   = ov.getContext('2d');
+let stageW = 1920, stageH = 1080;
+let surfaceList = [];            // ordered geometry from the editor
+let showOutlines = true;
+const mediaMap = new Map();      // surfId -> {kind, el, url, name}
+
+// videos live in a tiny visible holder — invisible media gets suspended
+const holder = document.createElement('div');
+holder.style.cssText = 'position:fixed;left:0;bottom:0;width:2px;height:2px;overflow:hidden;opacity:.02;pointer-events:none;z-index:0';
+document.body.appendChild(holder);
+
+function banner(msg, detail){
+  const b = document.getElementById('banner');
+  b.textContent = '⚠ THROW: ' + msg + (detail ? ' (' + detail + ')' : '');
+  b.style.display = 'block';
+  try{ bc.postMessage({type:'display-error', msg, detail}); }catch(_){}
+}
+function clearBanner(){ document.getElementById('banner').style.display = 'none'; }
+
+// ── Media handling (local to this tab) ────────────────────────────
+function clearMedia(surfId){
+  const m = mediaMap.get(surfId);
+  if(!m) return;
+  try{ if(m.el && m.el.pause) m.el.pause(); }catch(_){}
+  try{ if(m.el && m.el.parentNode) m.el.remove(); }catch(_){}
+  try{ if(m.el && m.el._stop) m.el._stop(); }catch(_){}
+  try{ if(m.url) URL.revokeObjectURL(m.url); }catch(_){}
+  mediaMap.delete(surfId);
+  // free GPU resources tied to this surface
+  try{
+    const t=glTex.get(surfId); if(t && gl){ gl.deleteTexture(t.tex); } glTex.delete(surfId);
+    const msh=glMesh.get(surfId); if(msh && gl){ gl.deleteBuffer(msh.vbo); } glMesh.delete(surfId);
+  }catch(_){}
+}
+
+async function setMediaBlob(surfId, name, blob){
+  clearMedia(surfId);
+  const file = new File([blob], name || 'media', {type: blob.type});
+  const video = isVideoFile(file);
+
+  if(!video && ANIMATED_EXT.test(name||'')){
+    try{
+      const anim = await createAnimatedCanvas(file);
+      if(anim){ mediaMap.set(surfId, {kind:'anim', el:anim.canvas, url:null, name}); return; }
+    }catch(err){ banner(err.message); }
+    // fall through to plain <img> (browser still animates GIF/WebP natively)
+  }
+
+  const url = typedBlobURL(file, video);
+  if(video){
+    // Advisory sniff (never blocks): warn early about live-wallpaper codecs
+    sniffVideoCodec(file).then(info=>{
+      if(info.name && !info.ok) banner((name||'video')+' looks like '+info.name+' — trying anyway; if it fails, see the hint that follows');
+    }).catch(()=>{});
+    const el = document.createElement('video');
+    el.muted = true; el.loop = true; el.playsInline = true; el.autoplay = true;
+    el.preload = 'auto';
+    el.setAttribute('muted',''); el.setAttribute('playsinline','');
+    let retried = false;
+    el.addEventListener('error', ()=>{
+      const code = el.error ? el.error.code : 0;
+      if(!retried){                       // one clean reload before blaming the file
+        retried = true;
+        try{ el.removeAttribute('src'); el.load(); }catch(_){}
+        setTimeout(()=>{ try{ el.src=url; el.load(); el.play().catch(()=>{}); }catch(_){} }, 70);
+        return;
+      }
+      banner('Couldn’t play '+(name||'that video')+' — '+mediaErrText(code)+'.', playbackHint(name, code));
+    });
+    el.addEventListener('loadeddata', ()=>{ clearBanner(); el.play().catch(()=>{}); });
+    holder.appendChild(el);
+    el.src = url;
+    el.play().catch(()=>{});
+    mediaMap.set(surfId, {kind:'video', el, url, name});
+  } else {
+    const el = new Image();
+    el.addEventListener('error', ()=>banner('Couldn’t load '+(name||'that image')+'.','the file may be corrupt or an unsupported format'));
+    el.src = url;
+    mediaMap.set(surfId, {kind:'image', el, url, name});
+  }
+}
+
+function setMediaSrc(surfId, src){   // data: URLs from a restored project
+  clearMedia(surfId);
+  if(typeof src !== 'string' || !src.startsWith('data:image/')) return;
+  const el = new Image();
+  el.src = src;
+  mediaMap.set(surfId, {kind:'image', el, url:null, name:'restored image'});
+}
+
+// raw=true returns the bare element (GL path: texImage2D uploads it once per
+// frame — the moral equivalent of the staging blit below, NOT the per-triangle
+// sampling that stalls Chrome's decoder).
+// raw=false (Canvas2D fallback) stages video frames into a canvas first:
+// sampling a <video> per warp-triangle (72 drawImage calls/frame on a 3×3
+// mesh) freezes playback at readyState 2 — verified empirically. One blit per
+// frame plays indefinitely.
+function mediaEl(surfId, raw){
+  const m = mediaMap.get(surfId);
+  if(!m) return null;
+  const el = m.el;
+  if(m.kind==='video'){
+    if(!(el.readyState>=2 && el.videoWidth>0)) return null;
+    if(raw) return el;
+    if(!m.stage){ m.stage=document.createElement('canvas'); m.stageCtx=m.stage.getContext('2d'); }
+    if(m.stage.width!==el.videoWidth || m.stage.height!==el.videoHeight){
+      m.stage.width=el.videoWidth; m.stage.height=el.videoHeight;
+    }
+    try{ m.stageCtx.drawImage(el,0,0); }catch(_){ return null; }
+    return m.stage;
+  }
+  if(m.kind==='anim')  return el;
+  return (el.complete && el.naturalWidth>0) ? el : null;
+}
+
+// Watchdog: re-kick paused videos, and detect DECODE STALLS — a video that is
+// "playing" but whose currentTime froze (seen when several 4K streams exceed
+// the GPU's hardware decode budget). A tiny re-seek restarts the decode
+// pipeline; if it keeps stalling, tell the user the honest reason.
+setInterval(()=>{
+  for(const m of mediaMap.values()){
+    if(m.kind!=='video') continue;
+    const el=m.el;
+    if(el.paused && !el.ended && el.readyState>=2){ el.play().catch(()=>{}); continue; }
+    if(!el.paused && el.readyState>=2){
+      if(m._lastT===el.currentTime){
+        m._stall=(m._stall||0)+1;
+        if(m._stall===2 || m._stall===4){
+          try{ el.currentTime=Math.max(0, el.currentTime-0.001); }catch(_){}
+          el.play().catch(()=>{});
+        } else if(m._stall===6){
+          banner((m.name||'a clip')+' keeps stalling — this machine is likely at its hardware video-decode limit. Several high-res clips at once? Re-encode them to 1080p (the projector can’t show more anyway).');
+        }
+      } else {
+        m._stall=0;
+      }
+      m._lastT=el.currentTime;
+    }
+  }
+}, 1500);
+
+// ── Sync (BroadcastChannel; same origin over localhost) ──────────
+const bc = new BroadcastChannel('throw-sync');
+let gotState = false;
+bc.onmessage = (ev)=>{
+  const d = ev.data || {};
+  if(d.type==='state'){
+    const st = JSON.parse(d.json);
+    stageW = st.stageW; stageH = st.stageH;
+    showOutlines = st.outlines;
+    surfaceList = st.surfaces;
+    // drop media for surfaces that no longer exist
+    const ids = new Set(surfaceList.map(s=>s.id));
+    for(const id of [...mediaMap.keys()]) if(!ids.has(id)) clearMedia(id);
+    if(!gotState){ gotState=true; document.getElementById('waiting').classList.add('hidden'); }
+  }
+  else if(d.type==='media')       setMediaBlob(d.surfId, d.name, new Blob([d.buf], {type:d.mime||''}));
+  else if(d.type==='media-src')   setMediaSrc(d.surfId, d.src);
+  else if(d.type==='media-clear') clearMedia(d.surfId);
+  else if(d.type==='editor-bye'){ /* editor closed; keep last frame */ }
+};
+// announce ourselves — the editor answers with full state + media
+bc.postMessage({type:'hello-display'});
+
+// ── Fullscreen ────────────────────────────────────────────────────
+// Fullscreen FIRST, then calibrate from the editor: because edits sync live
+// into this already-fullscreen tab, the mapping never shifts after alignment.
+// (The old "calibrate windowed, then fullscreen" flow moved everything —
+// letterbox offsets change with window size. This flow removes the problem.)
+function goFullscreen(){
+  const de = document.documentElement;
+  if(de.requestFullscreen) de.requestFullscreen().catch(()=>{});
+}
+document.getElementById('fsbtn').addEventListener('click', goFullscreen);
+document.addEventListener('dblclick', goFullscreen);
+document.addEventListener('fullscreenchange', ()=>{
+  document.body.classList.toggle('live', !!document.fullscreenElement);
+  fit();
+});
+document.addEventListener('keydown', e=>{
+  if(e.key==='f'||e.key==='F') goFullscreen();
+  if(e.key==='o'||e.key==='O') showOutlines=!showOutlines; // local override until next state msg
+});
+
+// ── WebGL renderer ─────────────────────────────────────────────────
+// Canvas2D warping (72 clipped drawImage calls per surface per frame) is why
+// three clips used to lag. The GPU does this workload natively: upload the
+// video frame as a texture ONCE, draw the whole warped mesh in one call.
+// Normal/Screen/Multiply/Add composite via blendFunc (+ shader tricks for
+// opacity); Overlay/Hard-Light/Color-Dodge aren't expressible with blendFunc,
+// so any surface using those drops the whole frame to the Canvas2D fallback.
+let gl=null, glLoc=null;
+const glMesh = new Map();   // surfId -> {vbo, count, key}
+const glTex  = new Map();   // surfId -> {tex, uploadedKey}
+const GL_OK_BLENDS = new Set(['normal','screen','multiply','add']);
+
+function initGL(){
+  try{
+    gl = oc.getContext('webgl', {alpha:false, antialias:false});
+    if(!gl) return false;
+    const vs =
+      'attribute vec2 a_pos; attribute vec2 a_uv; varying vec2 v_uv;'+
+      'uniform vec3 u_fit; uniform vec2 u_view;'+                 // fit: scale,ox,oy (stage→device px)
+      'void main(){'+
+      '  vec2 px = a_pos*u_fit.x + u_fit.yz;'+
+      '  gl_Position = vec4(px.x/u_view.x*2.0-1.0, 1.0-px.y/u_view.y*2.0, 0.0, 1.0);'+
+      '  v_uv = a_uv;'+
+      '}';
+    const fs =
+      'precision mediump float; varying vec2 v_uv;'+
+      'uniform sampler2D u_tex; uniform float u_opacity; uniform int u_mode;'+
+      'uniform vec4 u_adjust;'+   // brightness, contrast, saturation, hue (radians)
+      'void main(){'+
+      '  vec4 c = texture2D(u_tex, v_uv);'+
+      '  vec3 rgb = c.rgb * u_adjust.x;'+                          // brightness
+      '  rgb = (rgb - 0.5) * u_adjust.y + 0.5;'+                   // contrast
+      '  float lum = dot(rgb, vec3(0.2126,0.7152,0.0722));'+
+      '  rgb = mix(vec3(lum), rgb, u_adjust.z);'+                  // saturation
+      '  if(u_adjust.w != 0.0){'+                                  // hue: rotate about the grey axis
+      '    const vec3 k = vec3(0.57735);'+
+      '    float cs = cos(u_adjust.w), sn = sin(u_adjust.w);'+
+      '    rgb = rgb*cs + cross(k,rgb)*sn + k*dot(k,rgb)*(1.0-cs);'+
+      '  }'+
+      '  rgb = clamp(rgb, 0.0, 1.0);'+
+      '  float a = c.a * u_opacity;'+
+      '  if(u_mode==3){ gl_FragColor = vec4(mix(vec3(1.0), rgb, a), 1.0); }'+  // multiply: dst scales by this
+      '  else { gl_FragColor = vec4(rgb*a, a); }'+                             // premultiplied alpha
+      '}';
+    const sh=(type,src)=>{
+      const x=gl.createShader(type); gl.shaderSource(x,src); gl.compileShader(x);
+      if(!gl.getShaderParameter(x, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(x));
+      return x;
+    };
+    const prog=gl.createProgram();
+    gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+    gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(prog);
+    if(!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+    gl.useProgram(prog);
+    glLoc={
+      pos:gl.getAttribLocation(prog,'a_pos'), uv:gl.getAttribLocation(prog,'a_uv'),
+      fit:gl.getUniformLocation(prog,'u_fit'), view:gl.getUniformLocation(prog,'u_view'),
+      op:gl.getUniformLocation(prog,'u_opacity'), mode:gl.getUniformLocation(prog,'u_mode'),
+      adjust:gl.getUniformLocation(prog,'u_adjust'),
+    };
+    gl.enable(gl.BLEND);
+    gl.disable(gl.DEPTH_TEST);
+    gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+    return true;
+  }catch(_){ gl=null; return false; }
+}
+const hasGL = initGL();
+
+// Tessellate the bilinear mesh for the GPU. Subdivision is fixed and generous
+// (verts are nearly free in GL) so dense warps stay smooth.
+function buildMesh(s){
+  const sub=8, verts=[];
+  for(let r=0;r<s.rows;r++) for(let c=0;c<s.cols;c++){
+    const tl=s.pts[r][c], tr=s.pts[r][c+1], bl=s.pts[r+1][c], br=s.pts[r+1][c+1];
+    const u0=c/s.cols,u1=(c+1)/s.cols, v0=r/s.rows,v1=(r+1)/s.rows;
+    for(let si=0;si<sub;si++) for(let sj=0;sj<sub;sj++){
+      const ua=sj/sub,ub=(sj+1)/sub, va=si/sub,vb=(si+1)/sub;
+      const p00=biquad(tl,tr,bl,br,ua,va), p10=biquad(tl,tr,bl,br,ub,va);
+      const p01=biquad(tl,tr,bl,br,ua,vb), p11=biquad(tl,tr,bl,br,ub,vb);
+      const fH=!!(s.adjust&&s.adjust.flipH), fV=!!(s.adjust&&s.adjust.flipV);
+      const U=(u)=>{ const t=u0+u*(u1-u0); return fH?1.0-t:t; };
+      const V=(v)=>{ const t=v0+v*(v1-v0); return fV?1.0-t:t; };
+      verts.push(
+        p00.x,p00.y,U(ua),V(va),  p10.x,p10.y,U(ub),V(va),  p11.x,p11.y,U(ub),V(vb),
+        p00.x,p00.y,U(ua),V(va),  p11.x,p11.y,U(ub),V(vb),  p01.x,p01.y,U(ua),V(vb)
+      );
+    }
+  }
+  return new Float32Array(verts);
+}
+
+function drawGL(){
+  const W=oc.width, H=oc.height;
+  gl.viewport(0,0,W,H);
+  gl.disable(gl.SCISSOR_TEST);
+  gl.clearColor(0,0,0,1);
+  gl.clear(gl.COLOR_BUFFER_BIT);
+  if(!(stageW && stageH && surfaceList.length)) return;
+  const sc=Math.min(W/stageW, H/stageH);
+  const ox=(W-stageW*sc)/2, oy=(H-stageH*sc)/2;
+  gl.enable(gl.SCISSOR_TEST);   // clip to the stage rect, like the 2D path
+  gl.scissor(Math.round(ox), Math.round(H-oy-stageH*sc), Math.round(stageW*sc), Math.round(stageH*sc));
+  gl.uniform3f(glLoc.fit, sc, ox, oy);
+  gl.uniform2f(glLoc.view, W, H);
+
+  for(const s of surfaceList){
+    if(s.visible===false) continue;
+    const el = mediaEl(s.id, true);   // raw element: GL uploads it directly
+    if(!el) continue;                 // overlay draws the calibration placeholder
+    const m = mediaMap.get(s.id);
+
+    let t=glTex.get(s.id);
+    if(!t){ t={tex:gl.createTexture(), uploadedKey:null}; glTex.set(s.id,t); }
+    gl.bindTexture(gl.TEXTURE_2D, t.tex);
+    const staticKey = (m.kind==='image') ? m.el.src : null;   // video/anim re-upload every frame
+    if(staticKey===null || t.uploadedKey!==staticKey){
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+      try{ gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el); }
+      catch(_){ continue; }
+      t.uploadedKey=staticKey;
+    }
+
+    const key=s.rows+'x'+s.cols+'|'+((s.adjust&&s.adjust.flipH)?'H':'')+((s.adjust&&s.adjust.flipV)?'V':'')+'|'+JSON.stringify(s.pts);
+    let msh=glMesh.get(s.id);
+    if(!msh){ msh={vbo:gl.createBuffer(), count:0, key:null}; glMesh.set(s.id,msh); }
+    gl.bindBuffer(gl.ARRAY_BUFFER, msh.vbo);
+    if(msh.key!==key){
+      const v=buildMesh(s);
+      gl.bufferData(gl.ARRAY_BUFFER, v, gl.DYNAMIC_DRAW);
+      msh.count=v.length/4; msh.key=key;
+    }
+    gl.enableVertexAttribArray(glLoc.pos);
+    gl.enableVertexAttribArray(glLoc.uv);
+    gl.vertexAttribPointer(glLoc.pos, 2, gl.FLOAT, false, 16, 0);
+    gl.vertexAttribPointer(glLoc.uv,  2, gl.FLOAT, false, 16, 8);
+
+    const blend=s.blend||'normal';
+    gl.uniform1f(glLoc.op, (typeof s.opacity==='number')?s.opacity:1);
+    const adj=s.adjust||{};
+    gl.uniform4f(glLoc.adjust,
+      (typeof adj.br==='number')?adj.br:1,
+      (typeof adj.ct==='number')?adj.ct:1,
+      (typeof adj.sat==='number')?adj.sat:1,
+      (adj.hue||0)*Math.PI/180);
+    if(blend==='add'){           gl.uniform1i(glLoc.mode,1); gl.blendFunc(gl.ONE, gl.ONE); }
+    else if(blend==='screen'){   gl.uniform1i(glLoc.mode,2); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR); }
+    else if(blend==='multiply'){ gl.uniform1i(glLoc.mode,3); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
+    else {                       gl.uniform1i(glLoc.mode,0); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
+    gl.drawArrays(gl.TRIANGLES, 0, msh.count);
+  }
+}
+
+// ── Canvas2D fallback (no WebGL, or exotic blend modes in use) ────
+function draw2D(){
+  const W=oc2d.width, H=oc2d.height;
+  g2.setTransform(1,0,0,1,0,0);
+  g2.imageSmoothingEnabled=true;
+  g2.imageSmoothingQuality='high';
+  g2.fillStyle='#000';
+  g2.fillRect(0,0,W,H);
+  if(!(stageW && stageH && surfaceList.length)) return;
+  const sc=Math.min(W/stageW, H/stageH);
+  const ox=(W-stageW*sc)/2, oy=(H-stageH*sc)/2;
+  g2.save();
+  try{
+    g2.translate(ox,oy); g2.scale(sc,sc);
+    g2.beginPath(); g2.rect(0,0,stageW,stageH); g2.clip();
+    for(const s of surfaceList){
+      if(s.visible===false) continue;
+      try{
+        const el=mediaEl(s.id, false);   // staged: per-triangle video sampling stalls the decoder
+        if(el) renderSurfaceTo(g2, s, el, stageW, stageH);
+      }catch(err){ banner('A surface failed to render and was skipped', err.message); }
+    }
+  } finally { g2.restore(); }
+}
+
+// ── Overlay: calibration placeholders + outlines (always Canvas2D) ─
+function drawOverlay(){
+  og.setTransform(1,0,0,1,0,0);
+  og.clearRect(0,0,ov.width,ov.height);
+  if(!(stageW && stageH && surfaceList.length)) return;
+  const sc=Math.min(ov.width/stageW, ov.height/stageH);
+  const ox=(ov.width-stageW*sc)/2, oy=(ov.height-stageH*sc)/2;
+  og.save();
+  try{
+    og.translate(ox,oy); og.scale(sc,sc);
+    og.beginPath(); og.rect(0,0,stageW,stageH); og.clip();
+    for(const s of surfaceList){
+      if(s.visible===false) continue;
+      if(!mediaEl(s.id, true)) drawPlaceholderTo(og, s);
+    }
+    if(showOutlines) drawOutlinesTo(og, surfaceList, 2/sc);
+  } finally { og.restore(); }
+}
+
+// ── Render loop (this tab drives itself) ──────────────────────────
+function fit(){
+  // GL canvas renders at devicePixelRatio for pixel-exact fullscreen output;
+  // the 2D fallback and overlay stay at CSS pixels (their previous behaviour).
+  const dpr=Math.max(1, window.devicePixelRatio||1);
+  oc.width=Math.round(window.innerWidth*dpr); oc.height=Math.round(window.innerHeight*dpr);
+  oc2d.width=window.innerWidth; oc2d.height=window.innerHeight;
+  ov.width=window.innerWidth;   ov.height=window.innerHeight;
+}
+window.addEventListener('resize', fit);
+fit();
+
+let warned2D=false;
+function frame(){
+  const blendsOK = surfaceList.every(s => s.visible===false || GL_OK_BLENDS.has(s.blend||'normal'));
+  const useGL = hasGL && blendsOK;
+  oc.style.display   = useGL ? 'block' : 'none';
+  oc2d.style.display = useGL ? 'none'  : 'block';
+  if(hasGL && !useGL && !warned2D){
+    warned2D=true;   // informational, local only — not an error
+    const b=document.getElementById('banner');
+    b.textContent='ℹ Overlay / Hard Light / Color Dodge blends use the compatibility renderer — expect lower FPS with several videos';
+    b.style.display='block';
+    setTimeout(()=>{ if(warned2D) clearBanner(); }, 6000);
+  }
+  try{
+    if(useGL) drawGL(); else draw2D();
+    drawOverlay();
+  }catch(err){ banner('Render hiccup (recovering)', err.message); }
+  requestAnimationFrame(frame);
+}
+frame();
+
+window.addEventListener('beforeunload', ()=>{ try{ bc.postMessage({type:'display-bye'}); }catch(_){} });
+
+// Test hooks (read-only; used by tests/interaction.spec.js)
+Object.defineProperty(window,'surfaceList',{get:()=>surfaceList});
+Object.defineProperty(window,'mediaCount',{get:()=>mediaMap.size});
+Object.defineProperty(window,'stageSize',{get:()=>({w:stageW,h:stageH})});
+Object.defineProperty(window,'glActive',{get:()=>hasGL});
+</script>
+</body>
+</html>

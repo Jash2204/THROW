@@ -1,0 +1,2 @@
+Add a 1X1 option.
+Fix reloading buffering/blank outline shows for split second once video ends and restarts.

@@ -34,21 +34,21 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 ```
 
 - **The editor never plays video.** It shows a captured frame with a ▶ badge, so a wall of 4K clips costs nothing while you calibrate.
-- **The display owns its media.** It receives the raw bytes, builds its own `<video>` elements, and renders the warp itself at full resolution. Minimize the editor, cover it, switch away — the projection keeps playing.
-- **Fullscreen first, then calibrate.** Because edits sync live into the already-fullscreen display, the mapping can never shift after you've aligned it (the classic "everything moved when I fullscreened" problem is gone by construction).
+- **The display owns its media.** It receives the raw bytes, builds its own `<video>` elements, and renders the warp itself at full resolution via WebGL. Minimize the editor, cover it, switch away — the projection keeps playing.
+- **Fullscreen first, then calibrate.** Edits sync live into the already-fullscreen display, so the mapping can never shift after you've aligned it (the classic "everything moved when I fullscreened" problem is gone by construction).
 
 ---
 
 ## Features
 
-- **GPU-accelerated output.** The display renders with WebGL — multiple simultaneous clips at 60 fps (measured: 3 × 4K on a laptop). If playback ever stalls, THROW tells you it is the hardware decode limit and what to do about it (1080p sources — your projector cannot show more anyway).
+- **GPU-accelerated output.** The display renders with WebGL — one texture upload per video frame, one draw call per surface — delivering multiple simultaneous clips at 60 fps (measured: 3 × 4K on a laptop). Normal / Screen / Add / Multiply composite via `blendFunc`; Overlay / Hard Light / Color Dodge fall back to Canvas2D with a visible note. If playback stalls anyway, a watchdog detects the frozen `currentTime` and says plainly: *you're at the hardware decode limit; use 1080p sources* — your projector can't show more anyway.
 - **Mesh warp, 2×2 → 8×8.** Corner-pin at 2×2; step up for curves. Drag yellow corner diamonds or cyan inner dots.
 - **Whole-surface body drag** — click anywhere on a surface (not a handle) to move it rigidly. `H` hides handles entirely for a clean view (drags then always move whole surfaces).
-- **Trace mode** — click around a ceiling panel or beam; THROW fits a warped surface to the outline.
+- **Trace mode** — click around a ceiling panel or beam; THROW fits a warped surface to the outline automatically using a transfinite (Gordon–Coons) interior interpolation.
 - **Broad format support.** Drop anything the browser might decode: mp4, webm, mov, m4v, ogg/ogv, and even mkv/avi/wmv/mpeg attempts; png, jpg, webp, gif, avif, bmp, svg and more. Animated GIF/WebP/AVIF/APNG play frame-accurately via WebCodecs.
 - **Honest error messages.** Failures report the real `MediaError` with a fix tailored to the actual container — an `.mkv` says "convert the container", an HEVC "live wallpaper" `.mp4` says exactly that and points at HandBrake. Errors appear in **both** tabs, whichever one you're watching.
 - **Layers** with per-surface blend modes (Screen/Add make black project as transparent) and opacity.
-- **Per-surface image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip. Editor previews via canvas filters; the display applies the same math in its WebGL shader.
+- **Per-surface image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip. The editor previews via CSS canvas filters; the display applies the same math in its WebGL shader. Adjustment sliders never re-warp — they're applied at composite time.
 - **Outlines** (`O`) — project each surface's footprint to line up against real-world edges before the media is final.
 - **Stage presets** — FHD/4K/QHD/HD/WXGA/XGA or custom, remembered across sessions. Match your projector's native resolution for 1:1 pixels in fullscreen.
 - **Off-stage freedom** — surfaces can hang off or sit fully outside the stage (simply not projected). `C` rescues a lost surface.
@@ -68,7 +68,7 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 | `O` | Toggle outlines on the projected output |
 | `H` | Toggle mesh handles in the editor |
 | `Del` / `Backspace` | Delete selected surface |
-| `Esc` | Deselect / cancel place mode / close help |
+| `Esc` | Deselect / cancel trace mode / close help |
 | Drag a file onto the stage | Load media (auto-creates a surface on empty space) |
 | Double-click a surface | Open the media picker |
 
@@ -88,6 +88,8 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 
 **The picture moved when I fullscreened.** Fullscreen the display **before** calibrating, not after — that's the intended flow, and edits sync live either way.
 
+**Playback stalls with a "hardware decode limit" warning.** The GPU can only decode a finite number of simultaneous streams. Switch to 1080p sources — the projector can't show more resolution anyway.
+
 ---
 
 ## Repo layout
@@ -101,14 +103,18 @@ app/
 docs/
 ├── NOTES.md      ← engineering decisions log — why it is built this way
 └── TESTING.md    ← manual test checklist
-tests/            ← Playwright suite (12 tests)
+tests/            ← Playwright suite
 ```
 
 The warp core: each surface is a grid of control points; media is texture-mapped across it with affine triangles (subdivided so bends stay smooth), rendered to an offscreen buffer and composited once per surface so blend modes never double-apply. The display warps on the GPU (WebGL, one texture upload per video per frame); sampling a `<video>` per-triangle stalls Chrome's decoder, and Blob handles stall it across tabs — both found the hard way; the full story is in [NOTES.md](docs/NOTES.md).
 
+---
+
 ## Security
 
 Local-only. The server serves this folder to your own machine; nothing phones home. Untrusted inputs (media files, imported `.throw.json`) are validated: JSON schema-checked with a blend-mode allowlist and `data:image/`-only media, names rendered as plain text, no `eval`/`new Function`/`innerHTML` with user data, blob URLs revoked on release.
+
+---
 
 ## Running the tests
 
@@ -118,7 +124,9 @@ npx playwright install chromium
 npm test
 ```
 
-12 automated tests cover interaction, state isolation, presets, thumbnails, JSON validation, and editor↔display sync. Hardware-dependent paths (projector fullscreen, real-codec playback) are in [TESTING.md](docs/TESTING.md) — test those in a normally-launched browser, not an automated one (automation flags change media behaviour; see NOTES §2).
+Automated tests cover interaction, state isolation, presets, thumbnails, JSON validation, and editor↔display sync. Hardware-dependent paths (projector fullscreen, real-codec playback) are in [TESTING.md](docs/TESTING.md) — test those in a normally-launched browser, not an automated one (automation flags change media behaviour; see NOTES §2).
+
+---
 
 ## License
 

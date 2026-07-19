@@ -67,7 +67,7 @@ const og   = ov.getContext('2d');
 let stageW = 1920, stageH = 1080;
 let surfaceList = [];            // ordered geometry from the editor
 let showOutlines = true;
-const mediaMap = new Map();      // surfId -> {kind, el, url, name}
+const mediaMap = new Map();      // surfId -> {store:Map(itemId->item), order, cfg, cur, nxt, ...}
 
 // videos live in a tiny visible holder — invisible media gets suspended
 const holder = document.createElement('div');
@@ -82,124 +82,223 @@ function banner(msg, detail){
 }
 function clearBanner(){ document.getElementById('banner').style.display = 'none'; }
 
-// ── Media handling (local to this tab) ────────────────────────────
+// ── Media handling (playlists; local to this tab) ─────────────────
+// Per surface: a STORE of items (content-addressed by itemId — blobs arrive
+// once) plus an ORDER + transition config that ride the state broadcast.
+// The scheduler plays order[cur], advances on video 'ended' or an image
+// timer, and hands over via cut / crossfade / fade-to-black.
+function ensureM(surfId){
+  let M = mediaMap.get(surfId);
+  if(!M){
+    M = {store:new Map(), order:[], adjust:new Map(), cfg:{transition:'cut', xfDur:1, imgDur:8},
+         cur:null, nxt:null, xfStart:0, curStart:0};
+    mediaMap.set(surfId, M);
+  }
+  return M;
+}
+function disposeItem(item){
+  try{ if(item.el && item.el.pause) item.el.pause(); }catch(_){}
+  try{ if(item.el && item.el.parentNode) item.el.remove(); }catch(_){}
+  try{ if(item.el && item.el._stop) item.el._stop(); }catch(_){}
+  try{ if(item.url) URL.revokeObjectURL(item.url); }catch(_){}
+  try{ if(item.tex && gl) gl.deleteTexture(item.tex); }catch(_){}
+  item.tex=null;
+}
 function clearMedia(surfId){
-  const m = mediaMap.get(surfId);
-  if(!m) return;
-  try{ if(m.el && m.el.pause) m.el.pause(); }catch(_){}
-  try{ if(m.el && m.el.parentNode) m.el.remove(); }catch(_){}
-  try{ if(m.el && m.el._stop) m.el._stop(); }catch(_){}
-  try{ if(m.url) URL.revokeObjectURL(m.url); }catch(_){}
+  const M = mediaMap.get(surfId);
+  if(!M) return;
+  for(const item of M.store.values()) disposeItem(item);
   mediaMap.delete(surfId);
-  // free GPU resources tied to this surface
-  try{
-    const t=glTex.get(surfId); if(t && gl){ gl.deleteTexture(t.tex); } glTex.delete(surfId);
-    const msh=glMesh.get(surfId); if(msh && gl){ gl.deleteBuffer(msh.vbo); } glMesh.delete(surfId);
-  }catch(_){}
+  try{ const msh=glMesh.get(surfId); if(msh && gl) gl.deleteBuffer(msh.vbo); glMesh.delete(surfId); }catch(_){}
 }
 
-async function setMediaBlob(surfId, name, blob){
-  clearMedia(surfId);
+async function addItemBlob(surfId, itemId, name, blob){
+  const M = ensureM(surfId);
+  const old = M.store.get(itemId);
+  if(old) disposeItem(old);
   const file = new File([blob], name || 'media', {type: blob.type});
   const video = isVideoFile(file);
 
   if(!video && ANIMATED_EXT.test(name||'')){
     try{
       const anim = await createAnimatedCanvas(file);
-      if(anim){ mediaMap.set(surfId, {kind:'anim', el:anim.canvas, url:null, name}); return; }
+      if(anim){ M.store.set(itemId, {kind:'anim', el:anim.canvas, url:null, name}); return; }
     }catch(err){ banner(err.message); }
     // fall through to plain <img> (browser still animates GIF/WebP natively)
   }
 
   const url = typedBlobURL(file, video);
   if(video){
-    // Advisory sniff (never blocks): warn early about live-wallpaper codecs
-    sniffVideoCodec(file).then(info=>{
+    sniffVideoCodec(file).then(info=>{   // advisory only, never blocks
       if(info.name && !info.ok) banner((name||'video')+' looks like '+info.name+' — trying anyway; if it fails, see the hint that follows');
     }).catch(()=>{});
     const el = document.createElement('video');
-    el.muted = true; el.loop = true; el.playsInline = true; el.autoplay = true;
-    el.preload = 'auto';
+    el.muted = true; el.playsInline = true; el.preload = 'auto';
     el.setAttribute('muted',''); el.setAttribute('playsinline','');
+    el.loop = true;   // syncPl sets the real value (single item = loop)
     let retried = false;
     el.addEventListener('error', ()=>{
       const code = el.error ? el.error.code : 0;
       if(!retried){                       // one clean reload before blaming the file
         retried = true;
         try{ el.removeAttribute('src'); el.load(); }catch(_){}
-        setTimeout(()=>{ try{ el.src=url; el.load(); el.play().catch(()=>{}); }catch(_){} }, 70);
+        setTimeout(()=>{ try{ el.src=url; el.load(); if(isActive(surfId,itemId)) el.play().catch(()=>{}); }catch(_){} }, 70);
         return;
       }
       banner('Couldn’t play '+(name||'that video')+' — '+mediaErrText(code)+'.', playbackHint(name, code));
     });
-    el.addEventListener('loadeddata', ()=>{ clearBanner(); el.play().catch(()=>{}); });
+    el.addEventListener('loadeddata', ()=>{ clearBanner(); if(isActive(surfId,itemId)) el.play().catch(()=>{}); });
+    el.addEventListener('ended', ()=>{
+      const m=mediaMap.get(surfId);
+      if(m && m.cur===itemId && !m.nxt) advanceSurf(m);
+    });
     holder.appendChild(el);
     el.src = url;
-    el.play().catch(()=>{});
-    mediaMap.set(surfId, {kind:'video', el, url, name});
+    M.store.set(itemId, {kind:'video', el, url, name});
   } else {
     const el = new Image();
     el.addEventListener('error', ()=>banner('Couldn’t load '+(name||'that image')+'.','the file may be corrupt or an unsupported format'));
     el.src = url;
-    mediaMap.set(surfId, {kind:'image', el, url, name});
+    M.store.set(itemId, {kind:'image', el, url, name});
   }
+  syncPlayback(M);
 }
-
-function setMediaSrc(surfId, src){   // data: URLs from a restored project
-  clearMedia(surfId);
+function addItemSrc(surfId, itemId, src, name){   // data: URLs from a restored project
   if(typeof src !== 'string' || !src.startsWith('data:image/')) return;
+  const M = ensureM(surfId);
+  const old = M.store.get(itemId);
+  if(old) disposeItem(old);
   const el = new Image();
   el.src = src;
-  mediaMap.set(surfId, {kind:'image', el, url:null, name:'restored image'});
+  M.store.set(itemId, {kind:'image', el, url:null, name:name||'restored image'});
+  syncPlayback(M);
+}
+
+function isActive(surfId, itemId){
+  const M=mediaMap.get(surfId);
+  return !!M && (M.cur===itemId || M.nxt===itemId);
+}
+
+// Apply order + config from the state broadcast.
+function syncPl(surfId, pl){
+  const M = ensureM(surfId);
+  M.cfg = {transition:pl.transition||'cut', xfDur:pl.xfDur||1, imgDur:pl.imgDur||8};
+  const list = Array.isArray(pl.items) ? pl.items : [];
+  M.order = list.map(it=>it.id);
+  M.adjust = new Map(list.map(it=>[it.id, it.adjust||{}]));   // each item's own look
+  // prune items removed from the playlist
+  for(const id of [...M.store.keys()]) if(!M.order.includes(id)){ disposeItem(M.store.get(id)); M.store.delete(id); }
+  if(M.nxt && !M.order.includes(M.nxt)){ M.nxt=null; }
+  if(M.cur && !M.order.includes(M.cur)){ M.cur=null; }
+  syncPlayback(M);
+}
+// Make reality match intent: cur points at a valid item, only active videos
+// play, single-item videos loop natively (no 'ended' churn).
+function syncPlayback(M){
+  if(!M.cur && M.order.length) M.cur=M.order[0];
+  const now=performance.now();
+  for(const [id,item] of M.store){
+    if(item.kind!=='video') continue;
+    item.el.loop = (M.order.length===1);
+    const active = (id===M.cur || id===M.nxt);
+    if(active){
+      if(item.el.paused) item.el.play().catch(()=>{});
+    } else {
+      if(!item.el.paused){ try{ item.el.pause(); item.el.currentTime=0; }catch(_){} }
+    }
+  }
+  if(!M.curStart) M.curStart=now;
+}
+
+function advanceSurf(M){
+  if(!M || M.order.length<2 || M.nxt) return;
+  const i=Math.max(0, M.order.indexOf(M.cur));
+  const nid=M.order[(i+1)%M.order.length];
+  if(M.cfg.transition==='cut'){
+    const old=M.store.get(M.cur);
+    M.cur=nid; M.curStart=performance.now();
+    if(old && old.kind==='video'){ try{ old.el.pause(); old.el.currentTime=0; }catch(_){} }
+    syncPlayback(M);
+  } else {
+    M.nxt=nid; M.xfStart=performance.now();
+    syncPlayback(M);   // starts the incoming video during the fade
+  }
+}
+function finishTransition(M){
+  const old=M.store.get(M.cur);
+  M.cur=M.nxt; M.nxt=null; M.curStart=performance.now();
+  if(old && old.kind==='video'){ try{ old.el.pause(); old.el.currentTime=0; }catch(_){} }
+}
+
+// What to draw for a surface right now: one pass, or two during a crossfade.
+// mul scales the surface's own opacity.
+function surfacePasses(M, now){
+  if(M.nxt){
+    const k=Math.min(1, (now-M.xfStart)/(Math.max(0.05,M.cfg.xfDur)*1000));
+    if(k>=1) finishTransition(M);
+    else if(M.cfg.transition==='crossfade') return [{id:M.cur,mul:1-k},{id:M.nxt,mul:k}];
+    else return (k<0.5) ? [{id:M.cur,mul:1-2*k}] : [{id:M.nxt,mul:2*k-1}];   // fade to black
+  }
+  return M.cur ? [{id:M.cur,mul:1}] : [];
+}
+// Image/animation items advance on a timer (videos advance on 'ended').
+function tickPlaylists(now){
+  for(const M of mediaMap.values()){
+    if(M.order.length<2 || M.nxt || !M.cur) continue;
+    const it=M.store.get(M.cur);
+    if(it && it.kind!=='video' && now-M.curStart > M.cfg.imgDur*1000) advanceSurf(M);
+  }
 }
 
 // raw=true returns the bare element (GL path: texImage2D uploads it once per
-// frame — the moral equivalent of the staging blit below, NOT the per-triangle
-// sampling that stalls Chrome's decoder).
-// raw=false (Canvas2D fallback) stages video frames into a canvas first:
-// sampling a <video> per warp-triangle (72 drawImage calls/frame on a 3×3
-// mesh) freezes playback at readyState 2 — verified empirically. One blit per
-// frame plays indefinitely.
-function mediaEl(surfId, raw){
-  const m = mediaMap.get(surfId);
-  if(!m) return null;
-  const el = m.el;
-  if(m.kind==='video'){
-    if(!(el.readyState>=2 && el.videoWidth>0)) return null;
-    if(raw) return el;
-    if(!m.stage){ m.stage=document.createElement('canvas'); m.stageCtx=m.stage.getContext('2d'); }
-    if(m.stage.width!==el.videoWidth || m.stage.height!==el.videoHeight){
-      m.stage.width=el.videoWidth; m.stage.height=el.videoHeight;
+// frame — NOT the per-triangle sampling that stalls Chrome's decoder).
+// raw=false (Canvas2D fallback) stages video frames into a canvas first.
+// Once a video has shown ANY frame, hold the last good one through loop/seek
+// readyState dips instead of flashing the placeholder ('hold' sentinel).
+function itemEl(item, raw){
+  if(!item) return null;
+  const el = item.el;
+  if(item.kind==='video'){
+    const ready = el.readyState>=2 && el.videoWidth>0;
+    if(ready) item._hadFrame = true;
+    if(raw) return ready ? el : (item._hadFrame ? 'hold' : null);
+    if(!ready) return (item._hadFrame && item.stage) ? item.stage : null;
+    if(!item.stage){ item.stage=document.createElement('canvas'); item.stageCtx=item.stage.getContext('2d'); }
+    if(item.stage.width!==el.videoWidth || item.stage.height!==el.videoHeight){
+      item.stage.width=el.videoWidth; item.stage.height=el.videoHeight;
     }
-    try{ m.stageCtx.drawImage(el,0,0); }catch(_){ return null; }
-    return m.stage;
+    try{ item.stageCtx.drawImage(el,0,0); }catch(_){ return null; }
+    return item.stage;
   }
-  if(m.kind==='anim')  return el;
+  if(item.kind==='anim')  return el;
   return (el.complete && el.naturalWidth>0) ? el : null;
 }
 
-// Watchdog: re-kick paused videos, and detect DECODE STALLS — a video that is
-// "playing" but whose currentTime froze (seen when several 4K streams exceed
-// the GPU's hardware decode budget). A tiny re-seek restarts the decode
-// pipeline; if it keeps stalling, tell the user the honest reason.
+// Watchdog: re-kick paused ACTIVE videos, and detect DECODE STALLS — a video
+// "playing" with frozen currentTime (several high-res streams exceeding the
+// GPU decode budget). A tiny re-seek restarts the pipeline; if it keeps
+// stalling, say the honest reason.
 setInterval(()=>{
-  for(const m of mediaMap.values()){
-    if(m.kind!=='video') continue;
-    const el=m.el;
-    if(el.paused && !el.ended && el.readyState>=2){ el.play().catch(()=>{}); continue; }
-    if(!el.paused && el.readyState>=2){
-      if(m._lastT===el.currentTime){
-        m._stall=(m._stall||0)+1;
-        if(m._stall===2 || m._stall===4){
-          try{ el.currentTime=Math.max(0, el.currentTime-0.001); }catch(_){}
-          el.play().catch(()=>{});
-        } else if(m._stall===6){
-          banner((m.name||'a clip')+' keeps stalling — this machine is likely at its hardware video-decode limit. Several high-res clips at once? Re-encode them to 1080p (the projector can’t show more anyway).');
+  for(const M of mediaMap.values()){
+    for(const [id,item] of M.store){
+      if(item.kind!=='video') continue;
+      if(!(id===M.cur || id===M.nxt)) continue;   // inactive items are paused by design
+      const el=item.el;
+      if(el.paused && !el.ended && el.readyState>=2){ el.play().catch(()=>{}); continue; }
+      if(!el.paused && el.readyState>=2){
+        if(item._lastT===el.currentTime){
+          item._stall=(item._stall||0)+1;
+          if(item._stall===2 || item._stall===4){
+            try{ el.currentTime=Math.max(0, el.currentTime-0.001); }catch(_){}
+            el.play().catch(()=>{});
+          } else if(item._stall===6){
+            banner((item.name||'a clip')+' keeps stalling — this machine is likely at its hardware video-decode limit. Several high-res clips at once? Re-encode them to 1080p (the projector can’t show more anyway).');
+          }
+        } else {
+          item._stall=0;
         }
-      } else {
-        m._stall=0;
+        item._lastT=el.currentTime;
       }
-      m._lastT=el.currentTime;
     }
   }
 }, 1500);
@@ -214,14 +313,14 @@ bc.onmessage = (ev)=>{
     stageW = st.stageW; stageH = st.stageH;
     showOutlines = st.outlines;
     surfaceList = st.surfaces;
-    // drop media for surfaces that no longer exist
+    // drop media for surfaces that no longer exist; sync playlists for the rest
     const ids = new Set(surfaceList.map(s=>s.id));
     for(const id of [...mediaMap.keys()]) if(!ids.has(id)) clearMedia(id);
+    for(const s of surfaceList) if(s.pl) syncPl(s.id, s.pl);
     if(!gotState){ gotState=true; document.getElementById('waiting').classList.add('hidden'); }
   }
-  else if(d.type==='media')       setMediaBlob(d.surfId, d.name, new Blob([d.buf], {type:d.mime||''}));
-  else if(d.type==='media-src')   setMediaSrc(d.surfId, d.src);
-  else if(d.type==='media-clear') clearMedia(d.surfId);
+  else if(d.type==='pl-item') addItemBlob(d.surfId, d.itemId, d.name, new Blob([d.buf], {type:d.mime||''}));
+  else if(d.type==='pl-src')  addItemSrc(d.surfId, d.itemId, d.src, d.name);
   else if(d.type==='editor-bye'){ /* editor closed; keep last frame */ }
 };
 // announce ourselves — the editor answers with full state + media
@@ -255,8 +354,7 @@ document.addEventListener('keydown', e=>{
 // opacity); Overlay/Hard-Light/Color-Dodge aren't expressible with blendFunc,
 // so any surface using those drops the whole frame to the Canvas2D fallback.
 let gl=null, glLoc=null;
-const glMesh = new Map();   // surfId -> {vbo, count, key}
-const glTex  = new Map();   // surfId -> {tex, uploadedKey}
+const glMesh = new Map();   // surfId -> {vbo, count, key}   (textures live on playlist items)
 const GL_OK_BLENDS = new Set(['normal','screen','multiply','add']);
 
 function initGL(){
@@ -266,10 +364,12 @@ function initGL(){
     const vs =
       'attribute vec2 a_pos; attribute vec2 a_uv; varying vec2 v_uv;'+
       'uniform vec3 u_fit; uniform vec2 u_view;'+                 // fit: scale,ox,oy (stage→device px)
+      'uniform vec2 u_flip;'+                                     // 0 or 1 per axis
       'void main(){'+
       '  vec2 px = a_pos*u_fit.x + u_fit.yz;'+
       '  gl_Position = vec4(px.x/u_view.x*2.0-1.0, 1.0-px.y/u_view.y*2.0, 0.0, 1.0);'+
-      '  v_uv = a_uv;'+
+      // abs(0-uv)=uv, abs(1-uv)=1-uv — flips per item without rebuilding the mesh
+      '  v_uv = abs(u_flip - a_uv);'+
       '}';
     const fs =
       'precision mediump float; varying vec2 v_uv;'+
@@ -306,7 +406,7 @@ function initGL(){
       pos:gl.getAttribLocation(prog,'a_pos'), uv:gl.getAttribLocation(prog,'a_uv'),
       fit:gl.getUniformLocation(prog,'u_fit'), view:gl.getUniformLocation(prog,'u_view'),
       op:gl.getUniformLocation(prog,'u_opacity'), mode:gl.getUniformLocation(prog,'u_mode'),
-      adjust:gl.getUniformLocation(prog,'u_adjust'),
+      adjust:gl.getUniformLocation(prog,'u_adjust'), flip:gl.getUniformLocation(prog,'u_flip'),
     };
     gl.enable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
@@ -327,9 +427,9 @@ function buildMesh(s){
       const ua=sj/sub,ub=(sj+1)/sub, va=si/sub,vb=(si+1)/sub;
       const p00=biquad(tl,tr,bl,br,ua,va), p10=biquad(tl,tr,bl,br,ub,va);
       const p01=biquad(tl,tr,bl,br,ua,vb), p11=biquad(tl,tr,bl,br,ub,vb);
-      const fH=!!(s.adjust&&s.adjust.flipH), fV=!!(s.adjust&&s.adjust.flipV);
-      const U=(u)=>{ const t=u0+u*(u1-u0); return fH?1.0-t:t; };
-      const V=(v)=>{ const t=v0+v*(v1-v0); return fV?1.0-t:t; };
+      // flips are a shader uniform now, so one mesh serves every item
+      const U=(u)=>u0+u*(u1-u0);
+      const V=(v)=>v0+v*(v1-v0);
       verts.push(
         p00.x,p00.y,U(ua),V(va),  p10.x,p10.y,U(ub),V(va),  p11.x,p11.y,U(ub),V(vb),
         p00.x,p00.y,U(ua),V(va),  p11.x,p11.y,U(ub),V(vb),  p01.x,p01.y,U(ua),V(vb)
@@ -353,27 +453,14 @@ function drawGL(){
   gl.uniform3f(glLoc.fit, sc, ox, oy);
   gl.uniform2f(glLoc.view, W, H);
 
+  const now=performance.now();
   for(const s of surfaceList){
     if(s.visible===false) continue;
-    const el = mediaEl(s.id, true);   // raw element: GL uploads it directly
-    if(!el) continue;                 // overlay draws the calibration placeholder
-    const m = mediaMap.get(s.id);
+    const M = mediaMap.get(s.id);
+    if(!M) continue;
 
-    let t=glTex.get(s.id);
-    if(!t){ t={tex:gl.createTexture(), uploadedKey:null}; glTex.set(s.id,t); }
-    gl.bindTexture(gl.TEXTURE_2D, t.tex);
-    const staticKey = (m.kind==='image') ? m.el.src : null;   // video/anim re-upload every frame
-    if(staticKey===null || t.uploadedKey!==staticKey){
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
-      gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
-      try{ gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el); }
-      catch(_){ continue; }
-      t.uploadedKey=staticKey;
-    }
-
-    const key=s.rows+'x'+s.cols+'|'+((s.adjust&&s.adjust.flipH)?'H':'')+((s.adjust&&s.adjust.flipV)?'V':'')+'|'+JSON.stringify(s.pts);
+    // mesh is per-surface and shared by all passes
+    const key=s.rows+'x'+s.cols+'|'+JSON.stringify(s.pts);
     let msh=glMesh.get(s.id);
     if(!msh){ msh={vbo:gl.createBuffer(), count:0, key:null}; glMesh.set(s.id,msh); }
     gl.bindBuffer(gl.ARRAY_BUFFER, msh.vbo);
@@ -387,19 +474,43 @@ function drawGL(){
     gl.vertexAttribPointer(glLoc.pos, 2, gl.FLOAT, false, 16, 0);
     gl.vertexAttribPointer(glLoc.uv,  2, gl.FLOAT, false, 16, 8);
 
-    const blend=s.blend||'normal';
-    gl.uniform1f(glLoc.op, (typeof s.opacity==='number')?s.opacity:1);
-    const adj=s.adjust||{};
-    gl.uniform4f(glLoc.adjust,
-      (typeof adj.br==='number')?adj.br:1,
-      (typeof adj.ct==='number')?adj.ct:1,
-      (typeof adj.sat==='number')?adj.sat:1,
-      (adj.hue||0)*Math.PI/180);
-    if(blend==='add'){           gl.uniform1i(glLoc.mode,1); gl.blendFunc(gl.ONE, gl.ONE); }
-    else if(blend==='screen'){   gl.uniform1i(glLoc.mode,2); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR); }
-    else if(blend==='multiply'){ gl.uniform1i(glLoc.mode,3); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
-    else {                       gl.uniform1i(glLoc.mode,0); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
-    gl.drawArrays(gl.TRIANGLES, 0, msh.count);
+    // one pass normally; two overlapping passes during a crossfade
+    for(const pass of surfacePasses(M, now)){
+      const item = M.store.get(pass.id);
+      if(!item) continue;
+      const el = itemEl(item, true);
+      if(!el) continue;                       // overlay draws the placeholder
+      if(el==='hold' && !item.tex) continue;  // dip before any upload — nothing to hold
+
+      if(!item.tex){ item.tex=gl.createTexture(); item.uploadedKey=null; }
+      gl.bindTexture(gl.TEXTURE_2D, item.tex);
+      const staticKey = (item.kind==='image') ? item.el.src : null;   // video/anim re-upload every frame
+      if(el!=='hold' && (staticKey===null || item.uploadedKey!==staticKey)){
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        try{ gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, el); }
+        catch(_){ continue; }
+        item.uploadedKey=staticKey;
+      }
+
+      const blend=s.blend||'normal';
+      const op=((typeof s.opacity==='number')?s.opacity:1)*pass.mul;
+      gl.uniform1f(glLoc.op, op);
+      const adj=M.adjust.get(pass.id)||{};   // this ITEM's look, not the surface's
+      gl.uniform4f(glLoc.adjust,
+        (typeof adj.br==='number')?adj.br:1,
+        (typeof adj.ct==='number')?adj.ct:1,
+        (typeof adj.sat==='number')?adj.sat:1,
+        (adj.hue||0)*Math.PI/180);
+      gl.uniform2f(glLoc.flip, adj.flipH?1:0, adj.flipV?1:0);
+      if(blend==='add'){           gl.uniform1i(glLoc.mode,1); gl.blendFunc(gl.ONE, gl.ONE); }
+      else if(blend==='screen'){   gl.uniform1i(glLoc.mode,2); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR); }
+      else if(blend==='multiply'){ gl.uniform1i(glLoc.mode,3); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
+      else {                       gl.uniform1i(glLoc.mode,0); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA); }
+      gl.drawArrays(gl.TRIANGLES, 0, msh.count);
+    }
   }
 }
 
@@ -418,11 +529,19 @@ function draw2D(){
   try{
     g2.translate(ox,oy); g2.scale(sc,sc);
     g2.beginPath(); g2.rect(0,0,stageW,stageH); g2.clip();
+    const now=performance.now();
     for(const s of surfaceList){
       if(s.visible===false) continue;
+      const M=mediaMap.get(s.id);
+      if(!M) continue;
       try{
-        const el=mediaEl(s.id, false);   // staged: per-triangle video sampling stalls the decoder
-        if(el) renderSurfaceTo(g2, s, el, stageW, stageH);
+        for(const pass of surfacePasses(M, now)){
+          const item=M.store.get(pass.id);
+          const el=itemEl(item, false);   // staged: per-triangle video sampling stalls the decoder
+          if(!el) continue;
+          const op=((typeof s.opacity==='number')?s.opacity:1)*pass.mul;
+          renderSurfaceTo(g2, {...s, opacity:op}, el, stageW, stageH, M.adjust.get(pass.id)||{});
+        }
       }catch(err){ banner('A surface failed to render and was skipped', err.message); }
     }
   } finally { g2.restore(); }
@@ -441,7 +560,9 @@ function drawOverlay(){
     og.beginPath(); og.rect(0,0,stageW,stageH); og.clip();
     for(const s of surfaceList){
       if(s.visible===false) continue;
-      if(!mediaEl(s.id, true)) drawPlaceholderTo(og, s);
+      const M=mediaMap.get(s.id);
+      const cur=(M && M.cur) ? M.store.get(M.cur) : null;
+      if(!cur || !itemEl(cur, true)) drawPlaceholderTo(og, s);   // 'hold' is truthy — no flash
     }
     if(showOutlines) drawOutlinesTo(og, surfaceList, 2/sc);
   } finally { og.restore(); }
@@ -473,6 +594,7 @@ function frame(){
     setTimeout(()=>{ if(warned2D) clearBanner(); }, 6000);
   }
   try{
+    tickPlaylists(performance.now());   // image items advance on their timer
     if(useGL) drawGL(); else draw2D();
     drawOverlay();
   }catch(err){ banner('Render hiccup (recovering)', err.message); }
@@ -484,9 +606,14 @@ window.addEventListener('beforeunload', ()=>{ try{ bc.postMessage({type:'display
 
 // Test hooks (read-only; used by tests/interaction.spec.js)
 Object.defineProperty(window,'surfaceList',{get:()=>surfaceList});
-Object.defineProperty(window,'mediaCount',{get:()=>mediaMap.size});
+Object.defineProperty(window,'mediaCount',{get:()=>[...mediaMap.values()].filter(M=>M.order.length>0).length});
 Object.defineProperty(window,'stageSize',{get:()=>({w:stageW,h:stageH})});
 Object.defineProperty(window,'glActive',{get:()=>hasGL});
+window.plState=(id)=>{
+  const M=mediaMap.get(id);
+  return M ? {order:[...M.order], cur:M.cur, nxt:M.nxt, transition:M.cfg.transition,
+              items:M.store.size} : null;
+};
 </script>
 </body>
 </html>

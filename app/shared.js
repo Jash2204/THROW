@@ -182,7 +182,10 @@ const _octx = _off.getContext('2d');
 // compositing (so triangle seams never double-blend). Split out from the
 // composite step so callers can CACHE the warped buffer: a static image only
 // needs re-warping when the mesh moves, not every frame.
-function warpInto(buf, s, el, stageW, stageH){
+// `adj` is the LOOK being rendered — brightness/contrast/saturation/hue/flips.
+// It is passed in rather than read off the surface because each playlist item
+// carries its own, and a crossfade draws two different looks in one frame.
+function warpInto(buf, s, el, stageW, stageH, adj){
   if(buf.width!==stageW || buf.height!==stageH){ buf.width=stageW; buf.height=stageH; }
   const g = buf.getContext('2d');
   g.setTransform(1,0,0,1,0,0);
@@ -196,8 +199,8 @@ function warpInto(buf, s, el, stageW, stageH){
   const mh = el.videoHeight || el.naturalHeight || el.height;
   const sub = subdivFor(s);
   // Flips mirror the media WITHIN the mesh — the geometry itself stays put
-  const fH = !!(s.adjust && s.adjust.flipH);
-  const fV = !!(s.adjust && s.adjust.flipV);
+  const fH = !!(adj && adj.flipH);
+  const fV = !!(adj && adj.flipV);
   const U = (u)=> (fH ? 1-u : u) * mw;
   const V = (v)=> (fV ? 1-v : v) * mh;
 
@@ -225,10 +228,9 @@ function warpInto(buf, s, el, stageW, stageH){
   }
 }
 
-// CSS-filter string for a surface's colour adjustments ('' when neutral).
+// CSS-filter string for a look's colour adjustments ('' when neutral).
 // Applied at COMPOSITE time so tweaking sliders never invalidates warp caches.
-function adjustFilter(s){
-  const a=s.adjust;
+function adjustFilter(a){
   if(!a) return '';
   const br=(typeof a.br==='number')?a.br:1;
   const ct=(typeof a.ct==='number')?a.ct:1;
@@ -239,13 +241,13 @@ function adjustFilter(s){
 }
 
 // Composite a warped buffer onto dst ONCE with the surface's blend + opacity
-// (+ colour adjustments via canvas filter — a GPU-side op in Chromium).
-function compositeSurface(dst, buf, s){
+// (+ the item's colour adjustments via canvas filter — GPU-side in Chromium).
+function compositeSurface(dst, buf, s, adj){
   dst.save();
   try{
     dst.globalCompositeOperation = s.blend==='add' ? 'lighter' : (s.blend||'normal');
     dst.globalAlpha = (typeof s.opacity==='number') ? s.opacity : 1;
-    const f=adjustFilter(s);
+    const f=adjustFilter(adj);
     if(f) dst.filter=f;   // unsupported browsers ignore the assignment — honest degradation
     dst.drawImage(buf, 0, 0);
   } finally {
@@ -254,16 +256,16 @@ function compositeSurface(dst, buf, s){
 }
 
 // Convenience: warp + composite in one call (uncached path).
-function renderSurfaceTo(dst, s, el, stageW, stageH){
-  warpInto(_off, s, el, stageW, stageH);
-  compositeSurface(dst, _off, s);
+function renderSurfaceTo(dst, s, el, stageW, stageH, adj){
+  warpInto(_off, s, el, stageW, stageH, adj);
+  compositeSurface(dst, _off, s, adj);
 }
 
 // Cache key for a warped buffer: changes when anything that affects the WARP
 // changes (geometry, mesh density, stage size, media identity). Blend and
 // opacity are deliberately NOT included — they apply at composite time.
-function warpKey(s, el, stageW, stageH){
-  const a=s.adjust||{};
+function warpKey(s, el, stageW, stageH, adj){
+  const a=adj||{};
   return stageW+'x'+stageH+'|'+s.rows+'x'+s.cols+'|'+
          (el.width||el.naturalWidth||0)+'|'+(a.flipH?'H':'')+(a.flipV?'V':'')+'|'+
          JSON.stringify(s.pts);

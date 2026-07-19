@@ -10,9 +10,12 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 
 - [ ] Double-click `start.bat` — server starts minimized, editor opens at `http://localhost:8420/THROW.html`
 - [ ] DevTools console (F12): **zero errors on load**
+- [ ] Layout reads as: toolbar on top · SURFACES rail left · stage centre · INSPECTOR rail right · status bar bottom
+- [ ] Stage stays centred in its column at any window size; the toast never collides with the corner/inner/move legend
 
 ## 1 · Two-tab flow (the core path)
 
+- [ ] The ⧉ Display button goes solid acid with a pulsing dot and reads "LIVE" once the display connects; it reverts when that tab closes
 - [ ] Click **⧉ Display** — display.html opens in a new tab ("waiting for the editor" disappears immediately)
 - [ ] Add a surface in the editor — it appears in the display within a frame
 - [ ] Drag corners/body in the editor — display updates live
@@ -24,7 +27,7 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 - [ ] Load **3 clips at once** — display holds ~60 fps (WebGL renderer); if a clip stalls, the watchdog recovers it or a banner names the decode limit
 
 - [ ] Drop an **H.264 .mp4** on a surface: editor shows a captured frame + ▶ badge; display **plays it, moving**
-- [ ] Let it play **at least 30 seconds and through a loop restart** — earlier bugs froze at 0.4–4.4s with a convincing first frame
+- [ ] Let it play **at least 30 seconds and through a loop restart** — no placeholder/outline flash at the loop boundary (last frame holds through the seek) — earlier bugs froze at 0.4–4.4s with a convincing first frame
 - [ ] Fullscreen the display so it covers the editor (single screen) — video keeps playing
 - [ ] Minimize the editor window entirely — video keeps playing in the display
 - [ ] Drop a **4K clip** — still plays (staging-canvas path); editor stays responsive
@@ -46,6 +49,24 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 - [ ] Delete a surface — it disappears from the display (geometry AND its media)
 - [ ] Dup a surface with media — the copy shows media in the display too
 
+## 4a · Playlists
+
+- [ ] ＋ Add two videos to one surface — they play in order on the display; the second starts when the first ends
+- [ ] Mix an image between videos — the image holds for the configured Image time, then advances
+- [ ] Crossfade: during the fade both items are briefly visible blending into each other; Fade to black dips through black; Cut is instant
+- [ ] Reorder items (↑/↓) — the display follows immediately without re-transferring files
+- [ ] Remove the currently-playing item — playback recovers onto a remaining item
+- [ ] Single-video playlist still loops seamlessly (no flash at the loop point)
+
+## 4a2 · Stacking, scale & per-item looks
+
+- [ ] Overlap two surfaces — `⤒ Front` / `⤓ Back` (and `]` / `[`) change which one covers the other, in the editor AND the display
+- [ ] Scale slider grows/shrinks the selected surface about its centre; a warped mesh keeps its shape; dragging back to 100% restores the original size
+- [ ] With 2+ playlist items: clicking a row previews that item on the stage and ADJUST's header switches to that item's filename
+- [ ] Give item 1 and item 2 different brightness/hue — each keeps its own look; a Crossfade between them blends the two looks rather than snapping
+- [ ] Flip an item — only that item mirrors, the mesh geometry does not move
+- [ ] Reset clears only the selected item
+
 ## 4b · Adjust panel
 
 - [ ] Brightness/Contrast/Color/Hue sliders change the selected surface in BOTH tabs live (editor via canvas filter, display via shader)
@@ -55,6 +76,7 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 
 ## 5 · Stage & calibration
 
+- [ ] The toolbar STAGE control shows the current size; "Custom…" opens the W/H popover under it
 - [ ] Preset change (e.g. 4K) — applies in both tabs instantly; surfaces keep absolute position/scale
 - [ ] Custom size works; last size restored on reload
 - [ ] Drag a surface fully off-stage — allowed; not projected; `C` rescues it
@@ -62,6 +84,7 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 
 ## 6 · Editor interaction regression
 
+- [ ] 1×1 mesh: exactly 4 corner handles, drag warps that corner, body drag moves all four
 - [ ] Hit priority on 3×3+: corners → center-grab (translates) → inner points (deform)
 - [ ] Body-drag moves whole surface rigidly; dense-mesh handles shrink instead of overlapping in a small window
 - [ ] `H` hides handles; dragging anywhere then moves whole surfaces (no invisible corner-warps)

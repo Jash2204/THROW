@@ -6,103 +6,228 @@
 <title>THROW — Tiled Homographic Rendering Onto Walls</title>
 <style>
   :root{
-    --bg:#090b0e; --panel:#0f1215; --panel2:#141719; --line:#1e2228;
-    --ink:#dde1e7; --dim:#7a828e; --faint:#454d56;
-    --acid:#c4ff2e; --acid2:#8ab320; --cyan:#1fd6bc; --hot:#ff3b6b; --amber:#ffb020;
-    --r:6px;
+    /* ink → panel → control, two divider weights */
+    --bg:#0a0b0d; --panel:#0e1013; --panel2:#14171b;
+    --line:#20242b; --line2:#17191d;
+    /* text ramp: strongest → faintest */
+    --ink:#e6e9ee; --ink2:#c3cad4; --dim:#8b93a0; --dim2:#9aa2ae;
+    --faint:#6b7280; --faint2:#4a525c;
+    /* accents — acid is spent sparingly: only "selected" and "live" */
+    --acid:#c8ff36; --acid2:#8ab320; --cyan:#3ad6c0; --hot:#ff466f; --amber:#ffb23e;
+    --r:6px; --r2:8px;
+    /* Type pairing per the design: Plex Sans for interface, JetBrains for values.
+       Referenced, never fetched — THROW makes zero network calls, so these fall
+       back to system faces when not installed locally. */
     --mono:"JetBrains Mono","Fira Mono",ui-monospace,monospace;
-    --sans:"Inter","Archivo",system-ui,sans-serif;
+    --sans:"IBM Plex Sans","Inter",system-ui,sans-serif;
   }
   *{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
   html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--ink);font-family:var(--sans);-webkit-font-smoothing:antialiased}
 
   /* dot grid bg */
-  body::before{content:"";position:fixed;inset:0;background-image:radial-gradient(circle,rgba(255,255,255,.07) 1px,transparent 1px);background-size:24px 24px;pointer-events:none;z-index:0}
+  body::before{content:"";position:fixed;inset:0;background-image:radial-gradient(circle,rgba(255,255,255,.035) 1px,transparent 1px);background-size:26px 26px;pointer-events:none;z-index:0}
 
   .app{display:flex;flex-direction:column;height:100vh;position:relative;z-index:1}
-
-  .brand{font-family:var(--mono);font-weight:700;letter-spacing:.12em;font-size:15px;color:var(--acid);user-select:none;flex-shrink:0}
   .spacer{flex:1}
-  .hbtn{
-    display:flex;align-items:center;justify-content:center;gap:6px;padding:5px 11px;border-radius:var(--r);
-    border:1px solid var(--line);background:var(--panel2);color:var(--dim);
-    font:12px var(--mono);cursor:pointer;user-select:none;transition:all .15s;white-space:nowrap;
-  }
-  .hbtn:hover{border-color:var(--dim);color:var(--ink)}
-  .hbtn.active{border-color:var(--acid);color:var(--acid);background:rgba(196,255,46,.08)}
-  .hbtn.primary{border-color:var(--acid2);background:rgba(196,255,46,.12);color:var(--acid)}
-  .hbtn.wide{width:100%}
-  .hbtn.grow{flex:1}
-  .side-row{display:flex;gap:5px}
 
-  /* ─── WORKSPACE ─── */
+  /* ─── TOP TOOLBAR — actions live here ─── */
+  .toolbar{
+    display:flex;align-items:center;gap:14px;height:54px;padding:0 16px;
+    border-bottom:1px solid var(--line2);background:var(--panel);flex-shrink:0;z-index:30;
+  }
+  .brand{font:700 14px/1 var(--mono);letter-spacing:.22em;color:var(--acid);user-select:none;flex-shrink:0}
+  .tb-div{width:1px;height:22px;background:var(--line);flex-shrink:0}
+  .tb-group{display:flex;gap:8px;flex-shrink:0}
+
+  .btn{
+    display:flex;align-items:center;justify-content:center;gap:7px;height:32px;padding:0 13px;
+    border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);color:var(--ink2);
+    font:500 12.5px/1 var(--sans);cursor:pointer;user-select:none;white-space:nowrap;transition:all .14s;
+  }
+  .btn:hover{border-color:var(--dim);color:var(--ink)}
+  .btn.icon{width:32px;padding:0;font:500 14px/1 var(--mono);color:var(--dim)}
+  .btn.sm{font:500 11px/1 var(--mono);padding:0 10px;color:var(--dim)}
+  .btn.sm.danger{color:var(--hot)}
+  .btn.sm.danger:hover{border-color:rgba(255,70,111,.5)}
+  .btn.tog{color:var(--dim);font-size:12px;padding:0 12px}
+  .btn.tog.active{border-color:rgba(200,255,54,.3);background:rgba(200,255,54,.07);color:var(--acid)}
+
+  /* stage size — a toolbar control, not a sidebar field */
+  .tb-stage{
+    position:relative;display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 12px;
+    border:1px solid var(--line);border-radius:var(--r);background:var(--panel2);flex-shrink:0;
+  }
+  .tb-stage .lab{font:500 11px/1 var(--mono);letter-spacing:.08em;color:var(--dim)}
+  .stage-sel{background:transparent;border:none;color:var(--ink);font:500 11.5px/1 var(--mono);cursor:pointer;outline:none;padding:6px 2px}
+  .stage-sel option{background:var(--panel);color:var(--ink)}
+  .stage-pop{
+    position:absolute;top:calc(100% + 7px);right:0;z-index:40;min-width:178px;
+    background:var(--panel);border:1px solid var(--line);border-radius:var(--r2);
+    padding:11px 12px;box-shadow:0 16px 44px rgba(0,0,0,.6);
+  }
+
+  /* the one loud element: Display — goes solid + pulses when LIVE */
+  .btn-display{
+    display:flex;align-items:center;gap:8px;height:32px;padding:0 15px;flex-shrink:0;
+    border-radius:var(--r);border:1px solid var(--acid2);background:rgba(200,255,54,.1);
+    color:var(--acid);font:600 12.5px/1 var(--sans);cursor:pointer;white-space:nowrap;transition:all .16s;
+  }
+  .btn-display:hover{background:rgba(200,255,54,.18)}
+  .btn-display .live-dot{display:none;width:7px;height:7px;border-radius:50%;background:#0a0b0d;animation:throbPulse 1.8s ease-in-out infinite}
+  .btn-display .live-word{display:none}
+  .btn-display.active{background:var(--acid);color:#0a0b0d;border-color:var(--acid);box-shadow:0 0 22px rgba(200,255,54,.3)}
+  .btn-display.active .live-dot{display:inline-block}
+  .btn-display.active .live-word{display:inline}
+  @keyframes throbPulse{0%,100%{opacity:1}50%{opacity:.35}}
+
+  /* ─── WORKSPACE — objects left · canvas center · inspector right ─── */
   .workspace{display:flex;flex:1;overflow:hidden;position:relative}
+  .rail{flex-shrink:0;background:var(--panel);display:flex;flex-direction:column;overflow:hidden}
+  .rail-l{width:238px;border-right:1px solid var(--line2)}
+  .rail-r{width:304px;border-left:1px solid var(--line2);overflow-y:auto}
+  .rail-head{display:flex;align-items:center;justify-content:space-between;padding:14px 15px 10px;flex-shrink:0}
+  .rail-head .t{font:600 10px/1 var(--mono);letter-spacing:.18em;color:var(--faint)}
+  .rail-head .n{font:500 10px/1 var(--mono);color:var(--faint2)}
+  .rail-foot{display:flex;flex-direction:column;gap:6px;padding:10px;border-top:1px solid var(--line2);flex-shrink:0}
+  .foot-row{display:flex;gap:6px}
 
-  /* ─── LEFT PANEL (the whole menu) ─── */
-  .sidebar{
-    width:242px;flex-shrink:0;background:var(--panel);border-right:1px solid var(--line);
-    display:flex;flex-direction:column;overflow-y:auto;overflow-x:hidden;z-index:10;
-  }
-  .sb-brand{
-    display:flex;align-items:center;gap:8px;padding:10px;
-    border-bottom:1px solid var(--line);position:sticky;top:0;
-    background:var(--panel);z-index:5;
-  }
-  .sb-section{border-bottom:1px solid var(--line);padding:10px;flex-shrink:0}
-  .sb-title{font:10px var(--mono);letter-spacing:.1em;color:var(--faint);margin-bottom:8px;text-transform:uppercase}
-  .sb-row{display:flex;gap:6px;margin-bottom:6px;align-items:center}
-  .sb-label{font:11px var(--mono);color:var(--dim);flex:1;white-space:nowrap}
-  .sb-val{font:11px var(--mono);color:var(--ink);min-width:30px;text-align:right}
-  .layer-list{overflow-y:auto;max-height:132px}
+  /* ─── SURFACES LIST (left rail) ─── */
+  .layer-list{flex:1;overflow-y:auto;padding:0 8px 8px;display:flex;flex-direction:column;gap:3px}
   .layer-item{
-    display:flex;align-items:center;gap:8px;padding:7px 10px;cursor:pointer;
-    border-left:2px solid transparent;font:12px var(--sans);color:var(--dim);
-    transition:all .12s;
+    display:flex;align-items:center;gap:10px;padding:8px 9px;border-radius:7px;cursor:pointer;
+    border-left:2px solid transparent;transition:background .12s;
   }
-  .layer-item:hover{background:var(--panel2);color:var(--ink)}
-  .layer-item.sel{background:rgba(196,255,46,.06);border-left-color:var(--acid);color:var(--ink)}
-  .layer-thumb{width:28px;height:20px;border-radius:3px;background:var(--line);overflow:hidden;flex-shrink:0;position:relative}
-  .layer-thumb canvas{width:100%;height:100%;object-fit:cover}
-  .layer-name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:11px}
-  .layer-vis{font-size:13px;opacity:.5;cursor:pointer}
-  .layer-vis:hover{opacity:1}
-  .btn-row{display:flex;gap:5px;padding:8px 10px}
-  .sbtn{
-    flex:1;padding:5px;border-radius:var(--r);border:1px solid var(--line);
-    background:var(--panel2);color:var(--dim);font:10px var(--mono);cursor:pointer;
-    text-align:center;transition:all .12s;
-  }
-  .sbtn:hover{border-color:var(--dim);color:var(--ink)}
+  .layer-item:hover{background:var(--panel2)}
+  .layer-item.sel{background:rgba(200,255,54,.06);border-left-color:var(--acid)}
+  .layer-thumb{width:36px;height:24px;border-radius:4px;overflow:hidden;flex-shrink:0;border:1px solid var(--line);background:var(--panel2)}
+  .layer-thumb canvas{width:100%;height:100%;object-fit:cover;display:block}
+  .layer-body{flex:1;min-width:0}
+  .layer-name{font:500 12px/1.2 var(--sans);color:var(--dim2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .layer-item.sel .layer-name{color:var(--ink)}
+  .layer-meta{font:400 9.5px/1.2 var(--mono);color:var(--faint2);margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .layer-vis{font:12px/1 var(--mono);color:var(--faint2);cursor:pointer;flex-shrink:0;transition:color .12s}
+  .layer-item.sel .layer-vis{color:var(--acid)}
+  .layer-vis:hover{color:var(--ink)}
+  .rail-empty{font:400 11px/1.6 var(--sans);color:var(--faint2);text-align:center;padding:18px 10px}
 
-  .mesh-grid-sel{display:flex;gap:4px;flex-wrap:wrap}
+  /* small mono buttons (rail foot) */
+  .mini{
+    flex:1;text-align:center;padding:7px;border:1px solid var(--line);border-radius:var(--r);
+    background:var(--panel2);font:500 10.5px/1 var(--mono);color:var(--dim);cursor:pointer;transition:all .12s;
+  }
+  .mini:hover{border-color:var(--dim);color:var(--ink)}
+  .mini.danger{color:var(--hot)}
+  .mini.danger:hover{border-color:rgba(255,70,111,.5)}
+
+  /* ─── INSPECTOR (right rail) ─── */
+  .insp-head{padding:15px 16px 13px;border-bottom:1px solid var(--line2)}
+  .insp-t{font:600 10px/1 var(--mono);letter-spacing:.18em;color:var(--faint);margin-bottom:9px}
+  .insp-sel{display:flex;align-items:center;gap:10px}
+  .insp-thumb{width:44px;height:30px;border-radius:5px;overflow:hidden;flex-shrink:0;border:1px solid var(--line);background:var(--panel2)}
+  .insp-thumb canvas{width:100%;height:100%;object-fit:cover;display:block}
+  .insp-body{flex:1;min-width:0}
+  .insp-name{font:600 13.5px/1.1 var(--sans);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .insp-meta{font:400 10px/1.2 var(--mono);color:var(--acid);margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .insp-meta.none{color:var(--faint2)}
+
+  .sect{padding:14px 16px;border-bottom:1px solid var(--line2)}
+  .sect:last-child{border-bottom:none;padding-bottom:20px}
+  .sect-t{font:600 9.5px/1 var(--mono);letter-spacing:.16em;color:var(--faint2);margin-bottom:11px}
+  .sect-t.between{display:flex;align-items:center;justify-content:space-between}
+  .sect-t .cyan{font:500 9.5px/1 var(--mono);color:var(--cyan);letter-spacing:.06em}
+
+  .mesh-grid-sel{display:flex;gap:5px;flex-wrap:wrap;margin-bottom:11px}
   .mgbtn{
-    padding:3px 7px;border-radius:4px;border:1px solid var(--line);
-    background:var(--panel2);color:var(--dim);font:10px var(--mono);cursor:pointer;
+    padding:5px 9px;border-radius:5px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--dim);font:500 10.5px/1 var(--mono);cursor:pointer;transition:all .12s;
   }
   .mgbtn:hover{border-color:var(--dim);color:var(--ink)}
-  .mgbtn.active{border-color:var(--acid);color:var(--acid);background:rgba(196,255,46,.08)}
+  .mgbtn.active{border-color:rgba(200,255,54,.4);background:rgba(200,255,54,.08);color:var(--acid)}
 
-  /* blend / opacity */
-  .prop-row{display:flex;align-items:center;gap:6px;margin-bottom:6px}
-  .prop-label{font:10px var(--mono);color:var(--faint);width:56px;flex-shrink:0}
+  .row2{display:flex;gap:7px}
+  .row3{display:flex;gap:6px}
+  .dbtn{
+    flex:1;text-align:center;padding:7px;border:1px solid var(--line);border-radius:var(--r);
+    background:var(--panel2);font:500 11px/1 var(--sans);color:var(--dim);cursor:pointer;transition:all .12s;
+  }
+  .dbtn:hover{border-color:var(--dim);color:var(--ink)}
+  .dbtn.mono{font:500 10.5px/1 var(--mono)}
+  .dbtn.active{border-color:rgba(200,255,54,.4);background:rgba(200,255,54,.08);color:var(--acid)}
+
+  /* property rows (blend / opacity / adjust) */
+  .prop-row{display:flex;align-items:center;gap:10px;margin-bottom:13px}
+  .prop-row:last-child{margin-bottom:0}
+  .prop-label{font:400 11px/1 var(--sans);color:var(--dim);width:56px;flex-shrink:0}
   .prop-select{
     flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--ink);
-    font:10px var(--mono);padding:3px 5px;border-radius:4px;
+    font:500 11px/1 var(--mono);padding:7px 11px;border-radius:var(--r);cursor:pointer;outline:none;
   }
-  .prop-range{flex:1;accent-color:var(--acid);height:14px}
+  .prop-select option{background:var(--panel)}
+  .prop-range{flex:1;height:14px;accent-color:var(--acid);cursor:pointer;min-width:0}
+  .prop-range.grey{accent-color:#5a6470}
+  .sb-val{font:500 10.5px/1 var(--mono);color:var(--ink2);width:34px;text-align:right;flex-shrink:0}
 
-  /* ─── STAGE ─── */
-  .stage-wrap{flex:1;overflow:hidden;position:relative;background:transparent}
+  /* number fields (custom stage popover) */
+  .num-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
+  .num-row .l{font:11px var(--mono);color:var(--dim);flex:1}
+  .num-row input{width:68px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font:11px var(--mono);padding:5px 7px;border-radius:4px;text-align:right;outline:none}
+
+  /* ─── PLAYLIST ─── */
+  .pl-list{display:flex;flex-direction:column;gap:5px;margin-bottom:11px}
+  .pl-row{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:var(--r);background:var(--panel2);border:1px solid var(--line);cursor:pointer;transition:border-color .12s,background .12s}
+  .pl-row:hover{border-color:var(--dim)}
+  .pl-row.first{background:rgba(58,214,192,.06);border-color:rgba(58,214,192,.22)}
+  /* the item being previewed + edited wins the accent */
+  .pl-row.sel{background:rgba(200,255,54,.07);border-color:rgba(200,255,54,.45)}
+  .pl-row.sel .pl-name{color:var(--ink)}
+  .pl-idx{font:500 9.5px/1 var(--mono);color:var(--faint2);flex-shrink:0}
+  .pl-glyph{font:10px/1 var(--mono);color:var(--dim);flex-shrink:0}
+  .pl-row.first .pl-glyph{color:var(--cyan)}
+  .pl-name{flex:1;min-width:0;font:400 11px/1.1 var(--sans);color:var(--ink2);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  .pl-ctrls{display:flex;gap:1px;flex-shrink:0}
+  .pl-btn{padding:2px 4px;border-radius:3px;color:var(--faint2);cursor:pointer;font:11px/1 var(--mono);transition:color .12s}
+  .pl-btn:hover{color:var(--ink)}
+  .pl-btn.rm:hover{color:var(--hot)}
+  .pl-empty{font:400 11px/1 var(--sans);color:var(--faint2);padding:9px 0;text-align:center}
+  .pl-add{
+    text-align:center;padding:8px;border:1px dashed #2a2f37;border-radius:var(--r);
+    font:500 11px/1 var(--sans);color:var(--faint);cursor:pointer;transition:all .12s;
+  }
+  .pl-add:hover{border-color:var(--dim);color:var(--ink2)}
+
+  /* ─── STAGE (center) ─── */
+  .stage-wrap{
+    flex:1;position:relative;display:flex;align-items:center;justify-content:center;
+    overflow:hidden;background:radial-gradient(circle at 50% 46%,#0d0f12,#070809);
+  }
+  /* Centred by the flex parent — do NOT re-add top/left/transform here: #stage
+     carries an inline position:relative (it's the containing block for the two
+     canvases), so a 50% offset would stack on top of the flex centring. */
   #stage{
-    position:absolute;top:50%;left:50%;
-    transform:translate(-50%,-50%);
     background:#000;
-    box-shadow:0 0 0 1px var(--line),0 0 60px rgba(0,0,0,.8);
+    box-shadow:0 0 0 1px var(--line),0 24px 60px rgba(0,0,0,.7);
   }
-  .stage-label{
-    position:absolute;font:9px var(--mono);color:var(--faint);letter-spacing:.08em;
-    white-space:nowrap;pointer-events:none;
+  .stage-corner{
+    position:absolute;top:14px;left:16px;z-index:2;pointer-events:none;
+    font:400 10px/1 var(--mono);color:#3a4048;letter-spacing:.1em;
   }
+  .stage-legend{
+    position:absolute;bottom:16px;left:50%;transform:translateX(-50%);z-index:2;pointer-events:none;
+    display:flex;align-items:center;gap:14px;padding:7px 14px;
+    border:1px solid var(--line);border-radius:var(--r2);background:rgba(14,16,19,.85);
+    backdrop-filter:blur(6px);font:400 10.5px/1 var(--mono);color:var(--faint);
+  }
+  .stage-legend .sep{color:#2a2f37}
+  .stage-legend .corner{color:var(--acid)}
+  .stage-legend .inner{color:var(--cyan)}
+  .stage-legend .move{color:var(--dim)}
+  .stage-empty{
+    position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);
+    z-index:3;pointer-events:none;text-align:center;
+  }
+  .stage-empty .t{font:400 13px/1.5 var(--sans);color:var(--dim)}
+  .stage-empty .s{margin-top:10px;font:400 11.5px/1.6 var(--mono);color:var(--faint)}
+  .stage-empty .s b{color:var(--acid);font-weight:400}
 
   /* surface canvas layer */
   #surfaceCanvas{position:absolute;top:0;left:0;pointer-events:none}
@@ -111,7 +236,7 @@
   /* ─── PLACE MODE overlay ─── */
   #placeOverlay{
     display:none;position:absolute;inset:0;z-index:100;
-    background:rgba(9,11,14,.7);backdrop-filter:blur(2px);
+    background:rgba(10,11,13,.7);backdrop-filter:blur(2px);
     align-items:center;justify-content:center;flex-direction:column;gap:16px;
   }
   #placeOverlay.active{display:flex}
@@ -127,83 +252,178 @@
 
   /* ─── STATUS BAR ─── */
   .statusbar{
-    display:flex;align-items:center;gap:14px;padding:4px 14px;
-    border-top:1px solid var(--line);background:rgba(9,11,14,.9);
-    font:10px var(--mono);color:var(--faint);z-index:20;
+    display:flex;align-items:center;gap:16px;height:32px;padding:0 16px;
+    border-top:1px solid var(--line2);background:var(--panel);
+    flex-shrink:0;z-index:20;
   }
-  .status-item{display:flex;align-items:center;gap:5px}
+  .status-item{display:flex;align-items:center;gap:6px;font:400 10px/1 var(--sans);color:var(--faint2)}
   .status-key{
-    padding:1px 5px;border-radius:3px;border:1px solid var(--line);
-    background:var(--panel2);color:var(--dim);font:9px var(--mono);
+    padding:2px 5px;border-radius:3px;border:1px solid var(--line);
+    background:var(--panel2);color:var(--dim);font:500 9px/1 var(--mono);
   }
+  #statusText{font:400 10.5px/1 var(--mono);color:var(--dim)}
 
-  /* ─── TOAST ─── */
+  /* ─── TOAST — sits clear of the stage legend at bottom-centre ─── */
   #toast{
-    position:fixed;bottom:36px;left:50%;transform:translateX(-50%) translateY(20px);
+    position:fixed;bottom:88px;left:50%;transform:translateX(-50%) translateY(20px);
     background:var(--panel);border:1px solid var(--line);border-radius:8px;
     padding:8px 16px;font:11px var(--mono);color:var(--ink);
     opacity:0;transition:all .2s;pointer-events:none;z-index:999;white-space:nowrap;
+    box-shadow:0 12px 34px rgba(0,0,0,.5);
   }
   #toast.show{opacity:1;transform:translateX(-50%) translateY(0)}
 
   /* drag-over highlight */
-  .drag-over #stage{box-shadow:0 0 0 2px var(--acid),0 0 40px rgba(196,255,46,.2)}
-
-  /* output window */
-  #outWin-guard{display:none}
+  .drag-over #stage{box-shadow:0 0 0 2px var(--acid),0 0 40px rgba(200,255,54,.25)}
 
   /* help modal bits */
-  .help-step{font:12px var(--sans);color:var(--ink);line-height:1.55;padding:8px 11px;background:var(--panel2);border:1px solid var(--line);border-radius:7px}
+  .help-step{font:12px/1.5 var(--sans);color:var(--ink2);padding:11px 13px;background:var(--panel2);border:1px solid var(--line2);border-radius:8px}
   .help-step b{color:var(--acid);font-weight:600}
   .help-tip{font:11px var(--sans);color:var(--dim);line-height:1.7}
   .help-tip b{color:var(--ink);font-weight:600}
+  .help-cta{
+    padding:9px 18px;border-radius:var(--r);background:var(--acid);color:#0a0b0d;
+    font:600 12.5px/1 var(--sans);cursor:pointer;box-shadow:0 0 20px rgba(200,255,54,.25);
+  }
+  .help-cta:hover{background:#dbff7a}
   .kbd{display:inline-block;padding:1px 6px;border-radius:4px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:10px var(--mono)}
 </style>
 </head>
 <body>
 <div class="app">
 
+<!-- ─── TOP TOOLBAR — every action lives here ─── -->
+<div class="toolbar">
+  <span class="brand">THROW</span>
+  <div class="tb-div"></div>
+  <div class="tb-group">
+    <button class="btn" id="btnAdd" title="Add a surface (A)">＋ Surface</button>
+    <button class="btn" id="btnPlace" title="Trace a real-world shape — click around it, Enter to fit (P)">⬡ Trace</button>
+  </div>
+  <div class="tb-div"></div>
+  <div class="tb-group">
+    <button class="btn tog active" id="btnOutlines" title="Project surface outlines for lining up (O)">⛶ Outlines</button>
+    <button class="btn tog active" id="btnHandles" title="Show/hide mesh handles (H)">⊹ Handles</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="tb-group">
+    <button class="btn sm" id="btnSave" title="Export the project as a .throw.json file">↓ Save</button>
+    <button class="btn sm" id="btnLoad" title="Load a .throw.json project">↑ Load</button>
+    <button class="btn sm danger" id="btnClear" title="Remove every surface">✕ Clear</button>
+  </div>
+  <div class="tb-div"></div>
+  <button class="btn icon" id="btnHelp" title="Help &amp; shortcuts">?</button>
+  <div class="tb-stage">
+    <span class="lab">STAGE</span>
+    <select class="stage-sel" id="stagePreset" title="Match your projector's native resolution for 1:1 pixels">
+      <option value="1920x1080">1920×1080 · FHD</option>
+      <option value="3840x2160">3840×2160 · 4K</option>
+      <option value="2560x1440">2560×1440 · QHD</option>
+      <option value="1280x720">1280×720 · HD</option>
+      <option value="1280x800">1280×800 · WXGA</option>
+      <option value="1024x768">1024×768 · XGA</option>
+      <option value="custom">Custom…</option>
+    </select>
+    <div id="stageCustom" class="stage-pop" style="display:none">
+      <div class="num-row"><span class="l">Width</span><input type="number" id="stageW" value="1920"></div>
+      <div class="num-row"><span class="l">Height</span><input type="number" id="stageH" value="1080"></div>
+      <div class="dbtn" id="btnStageApply" style="margin-top:4px">Apply</div>
+    </div>
+  </div>
+  <button class="btn-display" id="btnOutput" title="Open the projector tab — fullscreen it on the projector; edits sync live (D)">
+    <span class="live-dot"></span>⧉ Display<span class="live-word"> — LIVE</span>
+  </button>
+</div>
+
 <div class="workspace">
 
-  <!-- LEFT SIDEBAR — the whole menu lives here now -->
-  <div class="sidebar">
-    <div class="sb-brand">
-      <span class="brand">THROW</span>
-      <span class="spacer"></span>
-      <button class="hbtn" id="btnHelp" title="Help & shortcuts">?</button>
+  <!-- ─── LEFT RAIL — the objects ─── -->
+  <div class="rail rail-l">
+    <div class="rail-head">
+      <span class="t">SURFACES</span>
+      <span class="n" id="surfCount">0</span>
     </div>
-
-    <div class="sb-section">
-      <button class="hbtn primary wide" id="btnOutput" title="Open the projector tab — fullscreen it on the projector; edits sync live (D)">⧉ Display</button>
-      <div class="side-row" style="margin-top:6px">
-        <button class="hbtn grow" id="btnAdd" title="Add a surface (A)">＋ Surface</button>
-        <button class="hbtn grow" id="btnPlace" title="Trace a real-world shape — click around it, Enter to fit (P)">⬡ Trace</button>
+    <div class="layer-list" id="layerList"></div>
+    <div class="rail-foot">
+      <div class="foot-row">
+        <div class="mini" id="btnFront" title="Bring to front — draw on top of the others (])">⤒ Front</div>
+        <div class="mini" id="btnBack" title="Send to back — draw underneath the others ([)">⤓ Back</div>
+      </div>
+      <div class="foot-row">
+        <div class="mini" id="btnDup" title="Duplicate the selected surface">Copy</div>
+        <div class="mini danger" id="btnDel" title="Delete the selected surface (Del)">Delete</div>
+        <div class="mini" id="btnMedia" title="Replace the selected surface's media">Media</div>
       </div>
     </div>
+  </div>
 
-    <div class="sb-section">
-      <div class="sb-title">Layers</div>
-      <div class="layer-list" id="layerList"></div>
-      <div class="btn-row">
-        <div class="sbtn" id="btnDup" title="Duplicate the selected surface">Copy</div>
-        <div class="sbtn" id="btnDel" style="color:var(--hot)" title="Delete the selected surface (Del)">Delete</div>
-        <div class="sbtn" id="btnMedia" title="Pick an image or video for the selected surface">Media</div>
+  <input type="file" id="fileLoad" accept=".json" style="display:none">
+  <input type="file" id="mediaLoad" accept="image/*,video/*,.mp4,.m4v,.mov,.qt,.webm,.ogv,.ogg,.mkv,.avi,.wmv,.flv,.mpg,.mpeg,.m2v,.3gp,.3g2,.ts,.mts,.m2ts,.vob,.f4v,.gif,.webp,.avif,.bmp,.tif,.tiff,.heic,.heif" style="display:none">
+  <input type="file" id="plMediaLoad" multiple accept="image/*,video/*,.mp4,.m4v,.mov,.qt,.webm,.ogv,.ogg,.mkv,.avi,.wmv,.flv,.mpg,.mpeg,.m2v,.3gp,.3g2,.ts,.mts,.m2ts,.vob,.f4v,.gif,.webp,.avif,.bmp,.tif,.tiff,.heic,.heif" style="display:none">
+
+  <!-- ─── CENTER — THE CANVAS ─── -->
+  <div class="stage-wrap" id="stageWrap">
+    <div class="stage-corner">STAGE · <span id="stageDimLabel">1920 × 1080</span></div>
+    <div id="stage" style="width:960px;height:540px;position:relative">
+      <canvas id="surfaceCanvas" width="1920" height="1080"></canvas>
+      <canvas id="interactCanvas" width="1920" height="1080"></canvas>
+    </div>
+    <div class="stage-empty" id="stageEmpty">
+      <div class="t">No surfaces yet</div>
+      <div class="s">Press <b>A</b> to add · or drop a file onto the stage</div>
+    </div>
+    <div class="stage-legend">
+      <span class="corner">◆ corner</span>
+      <span class="inner">● inner</span>
+      <span class="move">✛ move</span>
+    </div>
+    <div id="placeOverlay">
+      <canvas id="placeCanvas"></canvas>
+      <div class="place-msg">
+        <h3>⬡ TRACE MODE</h3>
+        <p>Click to add points around the real-world shape.<br>Right-click or press <b>Enter</b> to close &amp; fit the surface.<br>Press <b>Esc</b> to cancel.</p>
       </div>
     </div>
+  </div>
 
-    <div class="sb-section" id="propPanel">
-      <div class="sb-title">Surface</div>
-      <div class="prop-row" style="align-items:flex-start">
-        <div class="prop-label" style="margin-top:3px">Mesh</div>
-        <div class="mesh-grid-sel" id="meshSel" style="flex:1">
-          <div class="mgbtn active" data-r="2" data-c="2">2×2</div>
-          <div class="mgbtn" data-r="3" data-c="3">3×3</div>
-          <div class="mgbtn" data-r="4" data-c="4">4×4</div>
-          <div class="mgbtn" data-r="5" data-c="5">5×5</div>
-          <div class="mgbtn" data-r="6" data-c="6">6×6</div>
-          <div class="mgbtn" data-r="8" data-c="8">8×8</div>
+  <!-- ─── RIGHT RAIL — INSPECTOR (the selected surface) ─── -->
+  <div class="rail rail-r">
+    <div class="insp-head">
+      <div class="insp-t">INSPECTOR</div>
+      <div class="insp-sel">
+        <div class="insp-thumb"><canvas id="inspThumb" width="44" height="30"></canvas></div>
+        <div class="insp-body">
+          <div class="insp-name" id="inspName">No selection</div>
+          <div class="insp-meta none" id="inspMeta">select a surface</div>
         </div>
       </div>
+    </div>
+
+    <div class="sect" id="propPanel">
+      <div class="sect-t">GEOMETRY · MESH</div>
+      <div class="mesh-grid-sel" id="meshSel">
+        <div class="mgbtn" data-r="1" data-c="1">1×1</div>
+        <div class="mgbtn active" data-r="2" data-c="2">2×2</div>
+        <div class="mgbtn" data-r="3" data-c="3">3×3</div>
+        <div class="mgbtn" data-r="4" data-c="4">4×4</div>
+        <div class="mgbtn" data-r="5" data-c="5">5×5</div>
+        <div class="mgbtn" data-r="6" data-c="6">6×6</div>
+        <div class="mgbtn" data-r="8" data-c="8">8×8</div>
+      </div>
+      <div class="prop-row">
+        <div class="prop-label">Scale</div>
+        <input type="range" class="prop-range" id="rngScale" min="25" max="400" value="100"
+               title="Resize the surface around its centre. Relative to the size it had when you selected it — drag back to 100% to undo.">
+        <div class="sb-val" id="lblScale">100%</div>
+      </div>
+      <div class="row2">
+        <div class="dbtn" id="btnResetMesh" title="Flatten the warp back to a regular grid (R)">Flatten</div>
+        <div class="dbtn" id="btnCenter" title="Bring the surface back to the middle of the stage (C)">Center</div>
+      </div>
+    </div>
+
+    <div class="sect">
+      <div class="sect-t">COMPOSITE</div>
       <div class="prop-row">
         <div class="prop-label">Blend</div>
         <select class="prop-select" id="selBlend">
@@ -221,123 +441,87 @@
         <input type="range" class="prop-range" id="rngOpacity" min="0" max="100" value="100">
         <div class="sb-val" id="lblOpacity">100%</div>
       </div>
-      <div class="prop-row" style="margin-top:4px;gap:5px">
-        <div class="sbtn" id="btnResetMesh" style="flex:1" title="Flatten the warp back to a regular grid (R)">Flatten</div>
-        <div class="sbtn" id="btnCenter" style="flex:1" title="Bring the surface back to the middle of the stage (C)">Center</div>
-      </div>
     </div>
 
-    <div class="sb-section" id="adjustPanel">
-      <div class="sb-title">Adjust</div>
+    <div class="sect" id="adjustPanel">
+      <div class="sect-t between">
+        <span>ADJUST</span>
+        <span class="cyan" id="adjTarget">SURFACE</span>
+      </div>
       <div class="prop-row">
         <div class="prop-label">Bright</div>
-        <input type="range" class="prop-range" id="adjBr" min="0" max="200" value="100">
+        <input type="range" class="prop-range grey" id="adjBr" min="0" max="200" value="100">
         <div class="sb-val" id="lblBr">100</div>
       </div>
       <div class="prop-row">
         <div class="prop-label">Contrast</div>
-        <input type="range" class="prop-range" id="adjCt" min="0" max="200" value="100">
+        <input type="range" class="prop-range grey" id="adjCt" min="0" max="200" value="100">
         <div class="sb-val" id="lblCt">100</div>
       </div>
       <div class="prop-row">
         <div class="prop-label">Color</div>
-        <input type="range" class="prop-range" id="adjSat" min="0" max="200" value="100">
+        <input type="range" class="prop-range grey" id="adjSat" min="0" max="200" value="100">
         <div class="sb-val" id="lblSat">100</div>
       </div>
       <div class="prop-row">
         <div class="prop-label">Hue</div>
-        <input type="range" class="prop-range" id="adjHue" min="0" max="360" value="0">
+        <input type="range" class="prop-range grey" id="adjHue" min="0" max="360" value="0">
         <div class="sb-val" id="lblHue">0°</div>
       </div>
-      <div class="prop-row" style="margin-top:4px;gap:5px">
-        <div class="sbtn" id="btnFlipH" title="Mirror the media horizontally">⇄ Flip</div>
-        <div class="sbtn" id="btnFlipV" title="Mirror the media vertically">⇅ Flip</div>
-        <div class="sbtn" id="btnAdjReset" title="Reset all adjustments">Reset</div>
+      <div class="row3" style="margin-top:14px">
+        <div class="dbtn mono" id="btnFlipH" title="Mirror the media horizontally">⇄ Flip</div>
+        <div class="dbtn mono" id="btnFlipV" title="Mirror the media vertically">⇅ Flip</div>
+        <div class="dbtn mono" id="btnAdjReset" title="Reset all adjustments">Reset</div>
       </div>
     </div>
 
-    <div class="sb-section">
-      <div class="sb-title">View</div>
-      <div class="side-row">
-        <button class="hbtn grow active" id="btnOutlines" title="Project surface outlines for lining up (O)">⛶ Outlines</button>
-        <button class="hbtn grow active" id="btnHandles" title="Show/hide mesh handles (H)">⊹ Handles</button>
+    <div class="sect" id="playlistPanel">
+      <div class="sect-t between">
+        <span>PLAYLIST</span>
+        <span class="cyan" id="plTransLabel">CUT</span>
       </div>
-    </div>
-
-    <div class="sb-section" style="padding:10px">
-      <div class="sb-title">Stage</div>
-      <div class="prop-row">
-        <div class="prop-label">Size</div>
-        <select class="prop-select" id="stagePreset">
-          <option value="1920x1080">1920×1080 · FHD</option>
-          <option value="3840x2160">3840×2160 · 4K</option>
-          <option value="2560x1440">2560×1440 · QHD</option>
-          <option value="1280x720">1280×720 · HD</option>
-          <option value="1280x800">1280×800 · WXGA</option>
-          <option value="1024x768">1024×768 · XGA</option>
-          <option value="custom">Custom…</option>
+      <div class="pl-list" id="plList"></div>
+      <div class="pl-add" id="btnPlAdd" title="Append images/videos — they play in order on the display">＋ Add media</div>
+      <div class="prop-row" style="margin-top:13px">
+        <div class="prop-label">Change</div>
+        <select class="prop-select" id="selTransition" title="How one item hands over to the next">
+          <option value="cut">Cut</option>
+          <option value="crossfade">Crossfade</option>
+          <option value="fadeblack">Fade to black</option>
         </select>
       </div>
-      <div id="stageCustom" style="display:none">
-        <div class="sb-row">
-          <div class="sb-label">Width</div>
-          <input type="number" id="stageW" value="1920" style="width:60px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font:11px var(--mono);padding:2px 5px;border-radius:4px;text-align:right">
-        </div>
-        <div class="sb-row">
-          <div class="sb-label">Height</div>
-          <input type="number" id="stageH" value="1080" style="width:60px;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font:11px var(--mono);padding:2px 5px;border-radius:4px;text-align:right">
-        </div>
-        <div class="sbtn" id="btnStageApply" style="margin-top:6px">Apply</div>
+      <div class="prop-row" id="rowXfDur">
+        <div class="prop-label">Fade time</div>
+        <input type="range" class="prop-range" id="rngXfDur" min="2" max="30" value="10">
+        <div class="sb-val" id="lblXfDur">1.0s</div>
+      </div>
+      <div class="prop-row" id="rowImgDur">
+        <div class="prop-label">Image time</div>
+        <input type="range" class="prop-range" id="rngImgDur" min="2" max="30" value="8">
+        <div class="sb-val" id="lblImgDur">8s</div>
       </div>
     </div>
 
-    <div class="sb-section">
-      <div class="sb-title">Project</div>
-      <div class="btn-row" style="padding:0">
-        <div class="sbtn" id="btnSave" title="Export the project as a .throw.json file">↓ Save</div>
-        <div class="sbtn" id="btnLoad" title="Load a .throw.json project">↑ Load</div>
-        <div class="sbtn" id="btnClear" style="color:var(--hot)" title="Remove every surface">✕ Clear</div>
-      </div>
-    </div>
-
-    <input type="file" id="fileLoad" accept=".json" style="display:none">
-    <input type="file" id="mediaLoad" accept="image/*,video/*,.mp4,.m4v,.mov,.qt,.webm,.ogv,.ogg,.mkv,.avi,.wmv,.flv,.mpg,.mpeg,.m2v,.3gp,.3g2,.ts,.mts,.m2ts,.vob,.f4v,.gif,.webp,.avif,.bmp,.tif,.tiff,.heic,.heif" style="display:none">
-  </div>
-
-  <!-- STAGE WRAP -->
-  <div class="stage-wrap" id="stageWrap">
-    <div id="stage" style="width:960px;height:540px;position:relative">
-      <canvas id="surfaceCanvas" width="1920" height="1080"></canvas>
-      <canvas id="interactCanvas" width="1920" height="1080"></canvas>
-    </div>
-    <div id="placeOverlay">
-      <canvas id="placeCanvas"></canvas>
-      <div class="place-msg">
-        <h3>⬡ TRACE MODE</h3>
-        <p>Click to add points around the real-world shape.<br>Right-click or press <b>Enter</b> to close &amp; fit the surface.<br>Press <b>Esc</b> to cancel.</p>
-      </div>
-    </div>
   </div>
 </div>
 
-<!-- ERROR BANNER -->
-<div id="errBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:1000;background:#2a0d14;border-bottom:1px solid var(--hot);color:#ffd9e2;font:12px var(--mono);padding:10px 14px;line-height:1.5">
-  <div style="display:flex;align-items:flex-start;gap:10px">
-    <span style="color:var(--hot);font-weight:700">⚠ THROW</span>
+<!-- ERROR BANNER — honest, never silent, mirrored from the Display tab too -->
+<div id="errBanner" style="display:none;position:fixed;top:0;left:0;right:0;z-index:1000;background:#1e0d12;border-bottom:1px solid var(--hot);color:#ffd9e2;font:12px/1.55 var(--sans);padding:14px 16px">
+  <div style="display:flex;align-items:flex-start;gap:11px">
+    <span style="font:700 12px/1.3 var(--mono);color:var(--hot);flex-shrink:0">⚠ THROW</span>
     <span id="errMsg" style="flex:1"></span>
-    <span id="errClose" style="cursor:pointer;color:var(--dim);padding:0 4px">✕</span>
+    <span id="errClose" style="cursor:pointer;color:var(--dim);font:13px/1 var(--mono);padding:0 4px">✕</span>
   </div>
 </div>
 <div class="statusbar">
   <div class="status-item"><span class="status-key">A</span> Add</div>
+  <div class="status-item"><span class="status-key">P</span> Trace</div>
   <div class="status-item"><span class="status-key">D</span> Display</div>
-  <div class="status-item"><span class="status-key">O</span> Outlines</div>
   <div class="status-item"><span class="status-key">H</span> Handles</div>
+  <div class="status-item"><span class="status-key">O</span> Outlines</div>
   <div class="status-item"><span class="status-key">Del</span> Delete</div>
-  <div class="status-item"><span class="status-key">Drop</span> Media</div>
-  <div class="status-item" style="color:var(--faint)">？ Help for all shortcuts</div>
   <div class="spacer"></div>
-  <div id="statusText" style="color:var(--dim)">No surfaces — press A to add</div>
+  <div id="statusText">No surfaces — press A to add</div>
 </div>
 </div>
 
@@ -356,7 +540,7 @@
 
     <div style="display:flex;flex-direction:column;gap:10px">
       <div class="help-step"><b>1 · Add a surface</b> — click <span class="kbd">＋ Surface</span> (or press <span class="kbd">A</span>). A green mesh appears on the stage.</div>
-      <div class="help-step"><b>2 · Drop in media</b> — drag an image or video straight onto it, or double-click it. Most <b>.mp4 / .webm / .mov</b> play directly; THROW will tell you precisely if a clip needs converting (usually HEVC/AV1 \u2192 H.264).</div>
+      <div class="help-step"><b>2 · Drop in media</b> — drag an image or video straight onto it, or double-click it. Most <b>.mp4 / .webm / .mov</b> play directly; THROW will tell you precisely if a clip needs converting (usually HEVC/AV1 → H.264).</div>
       <div class="help-step"><b>3 · Shape &amp; place it</b> — drag the glowing corners (yellow) to match your surface, or <b>drag anywhere on the surface body to move the whole thing</b> without bending the mesh. Need a curve? Bump <b>Mesh Points</b> to 4×4+ and drag the inner cyan dots.</div>
       <div class="help-step"><b>4 · Or trace it</b> — click <span class="kbd">⬡ Trace</span> (or press <span class="kbd">P</span>) and click around a ceiling panel / beam / window; THROW fits the surface to that outline automatically.</div>
       <div class="help-step"><b>5 · Project</b> — click <span class="kbd">⧉ Display</span> to open the projector tab, drag it onto the projector, <b>fullscreen it FIRST</b>, then line everything up from here — every edit syncs live and the picture never shifts after you've aligned it. <span class="kbd">Esc</span> in the display exits fullscreen.</div>
@@ -373,9 +557,9 @@
     </div>
 
     <div style="display:flex;gap:8px;margin-top:18px;align-items:center">
-      <div id="helpStart" class="hbtn primary" style="cursor:pointer">Got it — let's go</div>
+      <div id="helpStart" class="help-cta">Got it — let's go</div>
       <span style="flex:1"></span>
-      <label style="font:10px var(--mono);color:var(--dim);display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="helpDontShow" style="accent-color:var(--acid)"> don't show on start</label>
+      <label style="font:10px var(--mono);color:var(--faint);display:flex;align-items:center;gap:6px;cursor:pointer"><input type="checkbox" id="helpDontShow" style="accent-color:var(--acid)"> don't show on start</label>
     </div>
   </div>
 </div>
@@ -412,20 +596,25 @@ const IS_FILE = location.protocol === 'file:';
 // happens in display.html, which receives geometry (as JSON) and media (as
 // Blobs — they structured-clone across BroadcastChannel) and renders itself.
 const bc = new BroadcastChannel('throw-sync');
-function bcSendMedia(s){
-  const m=s.media; if(!m) return;
-  // Ship BYTES, not a Blob handle. A structured-clone Blob is a lazy
-  // cross-context reference — Chrome's media demuxer stalls mid-stream when
-  // reading through it (first frame works, playback freezes at readyState 2).
-  // An ArrayBuffer is fully materialized on the receiving side, so the
-  // display's <video> reads purely local data. (~100ms copy per load — fine.)
-  if(m.file){
-    const f=m.file, id=s.id, fallbackName=s.name;
-    f.arrayBuffer().then(buf=>{
-      bc.postMessage({type:'media', surfId:id, name:f.name||fallbackName, mime:f.type||'', buf});
-    }).catch(err=>showError('Couldn’t send media to the Display tab', err.message));
-  } else if(typeof m.src==='string' && m.src.startsWith('data:')){
-    try{ bc.postMessage({type:'media-src', surfId:s.id, src:m.src}); }catch(_){}
+// Ship BYTES, not Blob handles. A structured-clone Blob is a lazy
+// cross-context reference — Chrome's media demuxer stalls mid-stream when
+// reading through it (first frame works, playback freezes at readyState 2).
+// An ArrayBuffer is fully materialized on the receiving side. Items are
+// content-addressed by id and sent ONCE; playlist order/config rides the
+// state broadcast, so reorders and removals never re-send megabytes.
+function bcSendPlaylist(s, force){
+  const pl=s.playlist; if(!pl) return;
+  for(const it of pl.items){
+    if(it._sent && !force) continue;
+    it._sent=true;
+    if(it.file){
+      const f=it.file, sid=s.id, iid=it.id, nm=it.name;
+      f.arrayBuffer().then(buf=>{
+        bc.postMessage({type:'pl-item', surfId:sid, itemId:iid, name:f.name||nm, mime:f.type||'', buf});
+      }).catch(err=>showError('Couldn’t send media to the Display tab', err.message));
+    } else if(typeof it.src==='string' && it.src.startsWith('data:')){
+      try{ bc.postMessage({type:'pl-src', surfId:s.id, itemId:it.id, src:it.src, name:it.name}); }catch(_){}
+    }
   }
 }
 let _lastSnap='';
@@ -434,7 +623,14 @@ function broadcastState(){
     stageW, stageH, outlines: outputShowOutlines,
     surfaces: surfaces.map(s=>({id:s.id, rows:s.rows, cols:s.cols, pts:s.pts,
                                 blend:s.blend, opacity:s.opacity, visible:s.visible,
-                                adjust:s.adjust||null}))
+                                // order AND per-item look both ride the state
+                                // diff — still no media bytes re-sent
+                                pl: s.playlist ? {
+                                  items: s.playlist.items.map(it=>({id:it.id, adjust:it.adjust||null})),
+                                  transition: s.playlist.transition,
+                                  xfDur: s.playlist.xfDur,
+                                  imgDur: s.playlist.imgDur
+                                } : null}))
   });
   if(snap!==_lastSnap){
     _lastSnap=snap;
@@ -445,7 +641,7 @@ bc.onmessage=(ev)=>{
   const d=ev.data||{};
   if(d.type==='hello-display'){
     _lastSnap='';                      // force a full state resend this frame
-    for(const s of surfaces) if(s.media) bcSendMedia(s);
+    for(const s of surfaces) bcSendPlaylist(s, true);
     toast('Display tab connected');
     document.getElementById('btnOutput').classList.add('active');
   } else if(d.type==='display-error'){
@@ -516,6 +712,7 @@ function makeSurface(x,y,w,h,rows=2,cols=2){
     opacity: 1,
     visible: true,
     adjust: {br:1, ct:1, sat:1, hue:0, flipH:false, flipV:false},
+    playlist: {items:[], transition:'cut', xfDur:1, imgDur:8},
     name: 'Surface'
   };
 }
@@ -524,6 +721,11 @@ function makeSurface(x,y,w,h,rows=2,cols=2){
 // The editor draws THUMBNAILS only (videos never play here — the Display tab
 // owns playback). shared.js provides the warp renderer and placeholder.
 function editorEl(m){ return m.animCanvas || m.thumb || m.el || null; }
+// The look for whatever the editor is previewing: the previewed playlist item's,
+// falling back to the surface default for media-less surfaces.
+function editorAdjust(s){
+  return (s.media && s.media.item && s.media.item.adjust) || s.adjust || DEF_ADJUST;
+}
 
 function mediaReady(s){
   const m=s.media; if(!m) return false;
@@ -541,21 +743,22 @@ function renderSurface(s, target){
     return;
   }
   const el = editorEl(s.media);
+  const adj = editorAdjust(s);
   if(s.media.animCanvas){
     // animated frames change every tick — caching would be a lie
-    renderSurfaceTo(dst, s, el, stageW, stageH);
+    renderSurfaceTo(dst, s, el, stageW, stageH, adj);
     return;
   }
   // Static media (image thumbs, video poster frames): re-warp only when the
-  // mesh/stage/media actually changed. Blend + opacity apply at composite
-  // time, so tweaking those sliders never triggers a re-warp either.
-  const key = warpKey(s, el, stageW, stageH);
+  // mesh/stage/media/flips actually change. Blend, opacity and colour apply at
+  // composite time, so those sliders never trigger a re-warp.
+  const key = warpKey(s, el, stageW, stageH, adj);
   if(s._warpKey !== key){
     if(!s._warpBuf) s._warpBuf = document.createElement('canvas');
-    warpInto(s._warpBuf, s, el, stageW, stageH);
+    warpInto(s._warpBuf, s, el, stageW, stageH, adj);
     s._warpKey = key;
   }
-  compositeSurface(dst, s._warpBuf, s);
+  compositeSurface(dst, s._warpBuf, s, adj);
 }
 
 // ── Render loop ───────────────────────────────
@@ -832,7 +1035,8 @@ function makeThumb(el){
 // created, seeked ~0.1s in (black lead-ins make useless thumbs), snapshotted,
 // destroyed. A decode failure here is an early warning in the same browser
 // the Display tab runs in, so report it with the honest codec hint.
-function makeVideoThumb(s, file){
+function makeVideoThumb(s, item){
+  const file=item.file;
   const url=typedBlobURL(file, true);
   const v=document.createElement('video');
   v.muted=true; v.playsInline=true; v.preload='auto';
@@ -844,7 +1048,10 @@ function makeVideoThumb(s, file){
   const snap=()=>{
     if(done) return; done=true;
     const t=makeThumb(v);
-    if(t && s.media && s.media.file===file){ s.media.thumb=t; updateUI(); }
+    if(t){
+      item._thumb=t;   // cached on the item so re-selecting it is instant
+      if(s.media && s.media.file===file){ s.media.thumb=t; updateUI(); }
+    }
     cleanup();
   };
   v.addEventListener('loadeddata',()=>{
@@ -861,60 +1068,163 @@ function makeVideoThumb(s, file){
   v.src=url;
 }
 
-function loadMediaToSurface(s,file){
-  if(!s){ showError('Pick a surface first, then add media.'); return; }
-  if(!file){ return; }
-  const name=(file.name||'');
-  const img=isImageFile(file), vid=isVideoFile(file);
-  if(!img && !vid){
-    showError('That file type isn’t supported.',
-      'drop an image (png/jpg/webp/gif/avif…) or a video (mp4/webm/mov/mkv/ogg…)'); return;
-  }
-
-  freeMedia(s);
-  s.name=(name||'media').replace(/\.[^.]+$/,'').substring(0,18);
-
-  if(vid){
-    // Advisory only — the Display tab's MediaError is the source of truth.
-    sniffVideoCodec(file).then(info=>{
-      if(info.name && !info.ok){
-        toast('Heads up: '+(name||'video')+' looks like '+info.name+' — trying anyway…', 2600);
-      }
-    }).catch(()=>{});
-    s.media={type:'video', file, name};
-    makeVideoThumb(s, file);
-  } else if(ANIMATED_EXT.test(name)){
-    s.media={type:'image', file, name};
-    createAnimatedCanvas(file).then(anim=>{
-      if(!s.media || s.media.file!==file) return;
-      if(anim){
-        s.media.animCanvas=anim.canvas; updateUI();
-        toast('Loaded: '+s.name+' ('+anim.frames+' frames)');
-      } else {
-        attachPlainImage(s, file);   // no ImageDecoder — browser still animates GIF/WebP in <img>
-      }
-    }).catch(err=>{
-      showError(err.message);
-      if(s.media && s.media.file===file) attachPlainImage(s, file);
-    });
-  } else {
-    s.media={type:'image', file, name};
-    attachPlainImage(s, file);
-  }
-
-  bcSendMedia(s);       // ship the original Blob to the Display tab
-  updateUI(); toast('Loaded: '+s.name);
+// ── Playlists ─────────────────────────────────
+// A surface's media is an ordered PLAYLIST of items (a single file = playlist
+// of one). Item blobs ship to the Display tab ONCE, addressed by item id;
+// reorders/removals/config changes ride the state broadcast — no re-sends.
+// The editor stage always shows item 0's thumbnail.
+let _plCounter=0;
+function plUid(){ return 'M'+(++_plCounter)+'_'+Date.now().toString(36); }
+function defaultPlaylist(){ return {items:[], transition:'cut', xfDur:1, imgDur:8}; }
+function playlistOf(s){ if(!s.playlist) s.playlist=defaultPlaylist(); return s.playlist; }
+// Every item carries its own LOOK. New items inherit the surface's default
+// (s.adjust) so "set it once, every clip matches" still works — after that each
+// item is edited independently.
+function mkItem(file, seed){
+  return {id:plUid(), file, name:file.name||'media', kind:isVideoFile(file)?'video':'image',
+          adjust:{...DEF_ADJUST, ...(seed||{})}};
 }
 
-function attachPlainImage(s, file){
+// ── Which item is being edited/previewed ──────
+// Stored per surface (s._selItem) rather than globally, so switching surfaces
+// can't leave ADJUST pointed at an item the stage isn't previewing.
+function selItem(s){
+  if(!s || !s.playlist || !s.playlist.items.length) return null;
+  return s.playlist.items.find(it=>it.id===s._selItem) || s.playlist.items[0];
+}
+// The look the ADJUST panel edits: the selected item's, or — when the surface
+// has no media yet — the surface's own default, which seeds items added later.
+function adjustTarget(s){
+  if(!s) return null;
+  const it=selItem(s);
+  if(it){ if(!it.adjust) it.adjust={...DEF_ADJUST}; return it.adjust; }
+  if(!s.adjust) s.adjust={...DEF_ADJUST};
+  return s.adjust;
+}
+// Preview a different playlist item on the stage (and point ADJUST at it)
+function selectPlItem(s, id){
+  if(!s || s._selItem===id) return;
+  s._selItem=id;
+  buildEditorMedia(s, selItem(s));
+  updateUI();
+}
+
+// Build the editor's stage representation (s.media) from a playlist item.
+function buildEditorMedia(s, item){
+  try{ if(s.media && s.media.animCanvas && s.media.animCanvas._stop) s.media.animCanvas._stop(); }catch(_){}
+  try{ if(s.media && s.media.src && !String(s.media.src).startsWith('data:')) URL.revokeObjectURL(s.media.src); }catch(_){}
+  s.media=null;
+  if(!item) return;
+  if(item.src){   // restored data: URL image (from a saved project)
+    const el=new Image();
+    el.addEventListener('load',()=>{ if(s.media && s.media.el===el){ s.media.thumb=item._thumb=makeThumb(el); updateUI(); } });
+    el.src=item.src;
+    s.media={type:'image', el, src:item.src, name:item.name, item, thumb:item._thumb||null};
+    return;
+  }
+  const file=item.file, name=item.name||'';
+  if(item.kind==='video'){
+    // Advisory only, and only the first time this item is built — the Display
+    // tab's real MediaError is the source of truth.
+    if(!item._sniffed){
+      item._sniffed=true;
+      sniffVideoCodec(file).then(info=>{
+        if(info.name && !info.ok){
+          toast('Heads up: '+(name||'video')+' looks like '+info.name+' — trying anyway…', 2600);
+        }
+      }).catch(()=>{});
+    }
+    s.media={type:'video', file, name, item, thumb:item._thumb||null};
+    // Re-selecting an item must not re-decode the file just to re-grab a frame
+    if(!item._thumb) makeVideoThumb(s, item);
+  } else if(ANIMATED_EXT.test(name)){
+    s.media={type:'image', file, name, item, thumb:item._thumb||null};
+    if(item._animCanvas){ s.media.animCanvas=item._animCanvas; return; }
+    createAnimatedCanvas(file).then(anim=>{
+      if(!s.media || s.media.file!==file) return;
+      if(anim){ s.media.animCanvas=item._animCanvas=anim.canvas; updateUI(); }
+      else attachPlainImage(s, item);   // no ImageDecoder — <img> still animates GIF/WebP
+    }).catch(err=>{
+      showError(err.message);
+      if(s.media && s.media.file===file) attachPlainImage(s, item);
+    });
+  } else {
+    s.media={type:'image', file, name, item, thumb:item._thumb||null};
+    attachPlainImage(s, item);
+  }
+}
+
+function attachPlainImage(s, item){
+  const file=item.file;
   const url=typedBlobURL(file, false);
   const el=new Image();
   el.addEventListener('error',()=>showError('Couldn’t load '+(file.name||'that image')+'.','the file may be corrupt or an unsupported format'));
-  el.addEventListener('load',()=>{ if(s.media && s.media.el===el){ s.media.thumb=makeThumb(el); updateUI(); } });
+  el.addEventListener('load',()=>{
+    item._thumb=makeThumb(el);
+    if(s.media && s.media.el===el){ s.media.thumb=item._thumb; updateUI(); }
+  });
   el.src=url;
   s.media.el=el; s.media.src=url;
 }
 
+function acceptableFiles(files){
+  const ok=[], bad=[];
+  for(const f of files) (isImageFile(f)||isVideoFile(f)) ? ok.push(f) : bad.push(f.name||'file');
+  if(bad.length) showError('Skipped unsupported file'+(bad.length>1?'s':'')+': '+bad.join(', '),
+    'drop images (png/jpg/webp/gif/avif…) or videos (mp4/webm/mov/mkv/ogg…)');
+  return ok;
+}
+
+// Replace the whole playlist with one file (drop / Media button / dblclick).
+function loadMediaToSurface(s,file){
+  if(!s){ showError('Pick a surface first, then add media.'); return; }
+  if(!file) return;
+  const ok=acceptableFiles([file]);
+  if(!ok.length) return;
+  const pl=playlistOf(s);
+  const seed=s.adjust;   // keep the surface's established look
+  freeMedia(s);
+  pl.items=[mkItem(ok[0], seed)];
+  s.name=(ok[0].name||'media').replace(/\.[^.]+$/,'').substring(0,18);
+  s._selItem=pl.items[0].id;
+  buildEditorMedia(s, pl.items[0]);
+  bcSendPlaylist(s);
+  updateUI(); toast('Loaded: '+s.name);
+}
+
+// Append files to the playlist (＋ Add in the Playlist panel).
+function addToPlaylist(s, files){
+  if(!s){ toast('Select a surface first'); return; }
+  const ok=acceptableFiles(files);
+  if(!ok.length) return;
+  const pl=playlistOf(s);
+  const wasEmpty=pl.items.length===0;
+  for(const f of ok) pl.items.push(mkItem(f, s.adjust));   // new clips inherit the surface look
+  if(wasEmpty){
+    s.name=(ok[0].name||'media').replace(/\.[^.]+$/,'').substring(0,18);
+    s._selItem=pl.items[0].id;
+    buildEditorMedia(s, pl.items[0]);
+  }
+  bcSendPlaylist(s);
+  updateUI(); toast('Added '+ok.length+' item'+(ok.length>1?'s':'')+' — playlist: '+pl.items.length);
+}
+
+function plMoveItem(s, i, d){
+  const pl=playlistOf(s);
+  const j=i+d;
+  if(j<0 || j>=pl.items.length) return;
+  [pl.items[i], pl.items[j]]=[pl.items[j], pl.items[i]];
+  updateUI();   // selection follows the item by id; order rides the state broadcast
+}
+function plRemoveItem(s, i){
+  const pl=playlistOf(s);
+  const [gone]=pl.items.splice(i,1);
+  if(gone && gone.id===s._selItem){        // was previewing the one just removed
+    s._selItem=pl.items.length?pl.items[0].id:null;
+    buildEditorMedia(s, selItem(s));
+  }
+  updateUI();
+}
 
 document.getElementById('mediaLoad').addEventListener('change',function(){
   const file=this.files[0]; if(!file) return;
@@ -922,6 +1232,15 @@ document.getElementById('mediaLoad').addEventListener('change',function(){
   if(s) loadMediaToSurface(s,file);
   this.value='';
 });
+document.getElementById('plMediaLoad').addEventListener('change',function(){
+  const files=[...this.files]; if(!files.length) return;
+  addToPlaylist(surfaces.find(s=>s.id===selId), files);
+  this.value='';
+});
+document.getElementById('btnPlAdd').onclick=()=>{
+  if(!selId){ toast('Select a surface first'); return; }
+  document.getElementById('plMediaLoad').click();
+};
 
 // ── Add surface ───────────────────────────────
 function addSurface(){
@@ -951,10 +1270,18 @@ document.getElementById('btnDup').onclick=()=>{
   // JSON cloning turns the warp-cache canvas into junk — drop it so the clone
   // builds its own on first render
   delete clone._warpBuf; delete clone._warpKey;
-  // re-attach media (thumb/anim canvas + blob are shared by reference)
+  // re-attach media (thumb/anim canvas + blob are shared by reference).
+  // Playlist items get FRESH ids (JSON cloning destroyed the File refs).
+  if(s.playlist){
+    clone.playlist={transition:s.playlist.transition, xfDur:s.playlist.xfDur, imgDur:s.playlist.imgDur,
+      items:s.playlist.items.map(it=>({id:plUid(), file:it.file, src:it.src, name:it.name, kind:it.kind,
+                                       adjust:{...DEF_ADJUST, ...(it.adjust||{})},
+                                       _thumb:it._thumb, _animCanvas:it._animCanvas, _sniffed:it._sniffed}))};
+    clone._selItem=clone.playlist.items.length?clone.playlist.items[0].id:null;
+  }
   if(s.media){ clone.media={...s.media, el:s.media.el} }
   surfaces.push(clone);
-  if(clone.media) bcSendMedia(clone);   // display needs the blob under the new id
+  bcSendPlaylist(clone);   // display needs the blobs under the new item ids
   selId=clone.id; updateUI();
 };
 
@@ -963,7 +1290,7 @@ function freeMedia(s){
   try{ if(s.media.animCanvas && s.media.animCanvas._stop) s.media.animCanvas._stop(); }catch(_){}
   try{ if(s.media.src && !String(s.media.src).startsWith('data:')) URL.revokeObjectURL(s.media.src); }catch(_){}
   s.media=null;
-  try{ bc.postMessage({type:'media-clear', surfId:s.id}); }catch(_){}
+  // display-side cleanup happens via the state broadcast (playlist order)
 }
 function deleteSel(){
   if(!selId) return;
@@ -1028,41 +1355,61 @@ document.getElementById('rngOpacity').oninput=function(){
   const s=surfaces.find(s=>s.id===selId); if(s) s.opacity=v/100;
 };
 
-// ── Layer list ────────────────────────────────
+// ── Surfaces list + inspector ─────────────────
+// Paint a surface's media into a thumbnail canvas (cover-fit). Videos get a ▶
+// badge because the editor only ever holds a captured frame — it never plays.
+function paintThumb(tc, media){
+  const g=tc.getContext('2d');
+  const W=tc.width, H=tc.height;
+  g.clearRect(0,0,W,H);
+  const msrc=media && (media.thumb || media.animCanvas);
+  if(!msrc) return false;
+  const sw=msrc.width, sh=msrc.height;
+  if(!sw || !sh) return false;
+  const sc=Math.max(W/sw, H/sh);   // cover-fit
+  g.drawImage(msrc,(W-sw*sc)/2,(H-sh*sc)/2,sw*sc,sh*sc);
+  if(media.type==='video'){
+    g.fillStyle='rgba(0,0,0,.4)'; g.fillRect(0,0,W,H);
+    g.fillStyle='rgba(255,255,255,.85)';
+    g.font=Math.round(H*0.42)+'px monospace';
+    g.textAlign='center'; g.textBaseline='middle'; g.fillText('▶',W/2,H/2);
+  }
+  return true;
+}
+
 function updateUI(){
   const list=document.getElementById('layerList');
-  list.innerHTML='';
+  list.textContent='';
+  // Top of the list = top of the stack, so reverse (last drawn is topmost)
   [...surfaces].reverse().forEach(s=>{
     const item=document.createElement('div');
     item.className='layer-item'+(s.id===selId?' sel':'');
+
     const thumb=document.createElement('div');
     thumb.className='layer-thumb';
     const tc=document.createElement('canvas');
-    tc.width=28; tc.height=20;
+    tc.width=36; tc.height=24;
     thumb.appendChild(tc);
-    const msrc=s.media && (s.media.thumb || s.media.animCanvas);
-    if(msrc){
-      const g=tc.getContext('2d');
-      const sw=msrc.width, sh=msrc.height;
-      const sc=Math.max(28/sw, 20/sh);   // cover-fit
-      g.drawImage(msrc,(28-sw*sc)/2,(20-sh*sc)/2,sw*sc,sh*sc);
-      if(s.media.type==='video'){
-        // subtle ▶ badge: static thumb, but it animates when live
-        g.fillStyle='rgba(0,0,0,.4)'; g.fillRect(0,0,28,20);
-        g.fillStyle='rgba(255,255,255,.85)'; g.font='9px monospace';
-        g.textAlign='center'; g.textBaseline='middle'; g.fillText('▶',14.5,10.5);
-      }
-    }
+    paintThumb(tc, s.media);
+
+    const body=document.createElement('div');
+    body.className='layer-body';
     const nameEl=document.createElement('div');
     nameEl.className='layer-name';
     nameEl.textContent=s.name||'Surface';
+    nameEl.title=s.name||'Surface';
+    const metaEl=document.createElement('div');
+    metaEl.className='layer-meta';
+    metaEl.textContent=`${s.rows}×${s.cols} · ${s.blend||'normal'}`;
+    body.append(nameEl, metaEl);
+
     const visEl=document.createElement('div');
     visEl.className='layer-vis';
     visEl.dataset.id=s.id;
     visEl.textContent=s.visible?'◉':'○';
-    item.appendChild(thumb);
-    item.appendChild(nameEl);
-    item.appendChild(visEl);
+    visEl.title=s.visible?'Visible — click to hide':'Hidden — click to show';
+
+    item.append(thumb, body, visEl);
     item.onclick=()=>{ selId=s.id; updateUI(); };
     visEl.onclick=(e)=>{
       e.stopPropagation();
@@ -1071,8 +1418,36 @@ function updateUI(){
     };
     list.appendChild(item);
   });
-  // Update mesh selector highlight
+  if(!surfaces.length){
+    const e=document.createElement('div');
+    e.className='rail-empty';
+    e.textContent='No surfaces yet — press A';
+    list.appendChild(e);
+  }
+  document.getElementById('surfCount').textContent=surfaces.length;
+  document.getElementById('stageEmpty').style.display=surfaces.length?'none':'block';
+
   const s=surfaces.find(s=>s.id===selId);
+
+  // Inspector header — what's selected, always the acid-highlighted thing
+  const inspName=document.getElementById('inspName');
+  const inspMeta=document.getElementById('inspMeta');
+  paintThumb(document.getElementById('inspThumb'), s && s.media);
+  if(s){
+    inspName.textContent=s.name||'Surface';
+    inspName.title=s.name||'Surface';
+    const items=(s.playlist&&s.playlist.items.length)||0;
+    inspMeta.textContent=items
+      ? `${items} item${items>1?'s':''} · ${s.rows}×${s.cols} mesh`
+      : `no media · ${s.rows}×${s.cols} mesh`;
+    inspMeta.classList.toggle('none', !items);
+  } else {
+    inspName.textContent='No selection';
+    inspMeta.textContent='select a surface';
+    inspMeta.classList.add('none');
+  }
+
+  // Mesh selector highlight
   if(s){
     document.querySelectorAll('#meshSel .mgbtn').forEach(b=>{
       b.classList.toggle('active',parseInt(b.dataset.r)===s.rows&&parseInt(b.dataset.c)===s.cols);
@@ -1081,10 +1456,12 @@ function updateUI(){
     document.getElementById('rngOpacity').value=Math.round(s.opacity*100);
     document.getElementById('lblOpacity').textContent=Math.round(s.opacity*100)+'%';
   }
+  syncScaleUI();
   syncAdjustUI();
+  syncPlaylistUI();
   document.getElementById('statusText').textContent=
     surfaces.length===0?'No surfaces — press A to add':
-    selId?`Selected: ${s?.name||'?'} — ${s?.rows||0}×${s?.cols||0} mesh`:`${surfaces.length} surface(s)`;
+    selId?`${s?.name||'?'} — ${s?.rows||0}×${s?.cols||0} mesh · ${s?.blend||'normal'}`:`${surfaces.length} surface(s)`;
 }
 
 // ── Stage resize ──────────────────────────────
@@ -1128,6 +1505,7 @@ function resizeStage(w,h){
   stageEl.style.height=Math.round(h*fitScale())+'px';
   SC.width=w; SC.height=h;
   IC.width=w; IC.height=h;
+  document.getElementById('stageDimLabel').textContent=w+' × '+h;
   fitStageToWrap();
 }
 function fitScale(){
@@ -1191,6 +1569,16 @@ function validateProjectData(data){
         flipH: !!a.flipH, flipV: !!a.flipV
       };
     } else sd.adjust=null;
+    // sanitise playlist config (items never persist in JSON)
+    if(sd.playlist && typeof sd.playlist==='object'){
+      const p=sd.playlist;
+      const num=(v,def,min,max)=>{ v=Number(v); return Number.isFinite(v) ? Math.max(min,Math.min(max,v)) : def; };
+      sd.playlist={
+        transition: ['cut','crossfade','fadeblack'].includes(p.transition) ? p.transition : 'cut',
+        xfDur: num(p.xfDur, 1, 0.2, 5),
+        imgDur: num(p.imgDur, 8, 2, 60)
+      };
+    } else sd.playlist=null;
     // sanitise name to plain text
     if(typeof sd.name==='string') sd.name=sd.name.substring(0,32);
     else sd.name='Surface';
@@ -1206,7 +1594,10 @@ document.getElementById('btnSave').onclick=function(){
   const promises=surfaces.map(async s=>({
     id:s.id, name:s.name, rows:s.rows, cols:s.cols,
     pts:s.pts, refX:s.refX, refY:s.refY, refW:s.refW, refH:s.refH,
-    blend:s.blend, opacity:s.opacity, visible:s.visible, adjust:s.adjust||null,
+    // the look that round-trips is the one on the item actually being embedded
+    blend:s.blend, opacity:s.opacity, visible:s.visible,
+    adjust:(selItem(s)&&selItem(s).adjust)||s.adjust||null,
+    playlist:s.playlist?{transition:s.playlist.transition, xfDur:s.playlist.xfDur, imgDur:s.playlist.imgDur}:null,
     mediaSrc:s.media? await toDataURL(editorEl(s.media),s.media.type):null,
     mediaType:s.media?s.media.type:null
   }));
@@ -1242,13 +1633,22 @@ document.getElementById('fileLoad').addEventListener('change',function(){
       syncStagePresetUI();
       surfaces=(data.surfaces||[]).map(sd=>{
         const s={...sd, media:null};
+        // restored playlist config (items don't persist — blobs can't live in
+        // JSON; a restored image becomes a single-item playlist)
+        s.playlist = sd.playlist
+          ? {items:[], transition:sd.playlist.transition, xfDur:sd.playlist.xfDur, imgDur:sd.playlist.imgDur}
+          : {items:[], transition:'cut', xfDur:1, imgDur:8};
         if(sd.mediaSrc && sd.mediaType==='image'){
           const img=new Image();
           img.addEventListener('error',()=>showError('A saved image in this project could not be restored.'));
           img.addEventListener('load',()=>{ if(s.media && s.media.el===img){ s.media.thumb=makeThumb(img); updateUI(); } });
           img.src=sd.mediaSrc;
           s.media={type:'image',el:img,src:sd.mediaSrc};
-          bcSendMedia(s);   // restored image → Display tab (as data: URL)
+          // the saved surface look becomes the restored item's look
+          s.playlist.items=[{id:plUid(), src:sd.mediaSrc, name:s.name||'image', kind:'image',
+                             adjust:{...DEF_ADJUST, ...(sd.adjust||{})}}];
+          s._selItem=s.playlist.items[0].id;
+          bcSendPlaylist(s);   // restored image → Display tab (as data: URL)
         }
         // Deliberately NO clamping: surfaces are allowed to sit partly or fully
         // off-stage (hidden / not projected). Press C to rescue a lost surface.
@@ -1482,20 +1882,73 @@ btnHandles.onclick=()=>setHandles(!handlesVisible);
 
 document.getElementById('btnCenter').onclick=()=>recenterSel();
 
+// ── Stacking order ────────────────────────────
+// surfaces[] IS the paint order — later entries draw on top. The rail lists it
+// reversed (top row = topmost), and the display renders the same array order,
+// so a reorder rides the normal state broadcast with no extra plumbing.
+function bringToFront(){
+  const i=surfaces.findIndex(s=>s.id===selId);
+  if(i<0){ toast('Select a surface first'); return; }
+  if(i===surfaces.length-1){ toast('Already at the front'); return; }
+  surfaces.push(surfaces.splice(i,1)[0]);
+  updateUI(); toast('Moved to front');
+}
+function sendToBack(){
+  const i=surfaces.findIndex(s=>s.id===selId);
+  if(i<0){ toast('Select a surface first'); return; }
+  if(i===0){ toast('Already at the back'); return; }
+  surfaces.unshift(surfaces.splice(i,1)[0]);
+  updateUI(); toast('Moved to back');
+}
+document.getElementById('btnFront').onclick=bringToFront;
+document.getElementById('btnBack').onclick=sendToBack;
+
+// ── Scale ─────────────────────────────────────
+// Scales every control point about the surface's centre, so a warped mesh keeps
+// its shape. The slider is cumulative from the moment you selected the surface
+// (it resets to 100% on selection change), which means dragging back to 100%
+// exactly undoes it — no separate "original size" state to keep.
+let _scaleLast=100, _scaleSelId=null;
+function scaleSurface(s, f){
+  if(!(f>0) || !isFinite(f)) return;
+  const c=surfaceCenter(s);
+  for(let r=0;r<=s.rows;r++) for(let col=0;col<=s.cols;col++){
+    const p=s.pts[r][col];
+    p.x=c.x+(p.x-c.x)*f;
+    p.y=c.y+(p.y-c.y)*f;
+  }
+}
+const rngScale=document.getElementById('rngScale');
+rngScale.oninput=function(){
+  const v=+this.value;
+  document.getElementById('lblScale').textContent=v+'%';
+  const s=surfaces.find(s=>s.id===selId);
+  if(!s){ this.value=100; _scaleLast=100; document.getElementById('lblScale').textContent='100%'; toast('Select a surface first'); return; }
+  scaleSurface(s, v/_scaleLast);
+  _scaleLast=v;
+};
+function syncScaleUI(){
+  // only rewind the dial when the selection actually changes
+  if(_scaleSelId===selId) return;
+  _scaleSelId=selId; _scaleLast=100;
+  rngScale.value=100;
+  document.getElementById('lblScale').textContent='100%';
+}
+
 // ── Adjust panel ──────────────────────────────
 // Per-surface colour adjustments + flips. Colour applies at composite time
 // (editor: canvas filter; display: GL uniforms) so sliders never re-warp.
 const DEF_ADJUST={br:1, ct:1, sat:1, hue:0, flipH:false, flipV:false};
-function adjustOf(s){
-  if(!s.adjust) s.adjust={...DEF_ADJUST};
-  return s.adjust;
-}
+// Edits land on the SELECTED PLAYLIST ITEM (adjustTarget), so two clips on one
+// surface can look completely different — and a crossfade keeps each one's look.
+function adjustOf(s){ return adjustTarget(s); }
 function bindAdjust(sliderId, labelId, prop, toVal, toLabel){
   const el=document.getElementById(sliderId), lbl=document.getElementById(labelId);
   el.oninput=function(){
     lbl.textContent=toLabel(this.value);
     const s=surfaces.find(s=>s.id===selId);
-    if(s) adjustOf(s)[prop]=toVal(this.value);
+    const a=adjustOf(s);
+    if(a) a[prop]=toVal(this.value);
   };
 }
 bindAdjust('adjBr','lblBr','br',   v=>v/100, v=>v);
@@ -1515,13 +1968,89 @@ btnFlipV.onclick=()=>{
 };
 document.getElementById('btnAdjReset').onclick=()=>{
   const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
-  s.adjust={...DEF_ADJUST}; updateUI(); toast('Adjustments reset');
+  const it=selItem(s);
+  if(it) it.adjust={...DEF_ADJUST}; else s.adjust={...DEF_ADJUST};
+  updateUI(); toast(it?'Reset: '+(it.name||'item'):'Adjustments reset');
 };
+
+// ── Playlist panel ────────────────────────────
+const selTransition=document.getElementById('selTransition');
+const rngXfDur=document.getElementById('rngXfDur');
+const rngImgDur=document.getElementById('rngImgDur');
+selTransition.onchange=function(){
+  const s=surfaces.find(s=>s.id===selId); if(!s) return;
+  playlistOf(s).transition=this.value;
+  syncPlaylistUI();
+};
+rngXfDur.oninput=function(){
+  const v=this.value/10;
+  document.getElementById('lblXfDur').textContent=v.toFixed(1)+'s';
+  const s=surfaces.find(s=>s.id===selId); if(s) playlistOf(s).xfDur=v;
+};
+rngImgDur.oninput=function(){
+  document.getElementById('lblImgDur').textContent=this.value+'s';
+  const s=surfaces.find(s=>s.id===selId); if(s) playlistOf(s).imgDur=+this.value;
+};
+
+function syncPlaylistUI(){
+  const s=surfaces.find(s=>s.id===selId);
+  const pl=(s && s.playlist) ? s.playlist : null;
+  const list=document.getElementById('plList');
+  list.textContent='';
+  const cur=selItem(s);
+  if(pl && pl.items.length){
+    pl.items.forEach((it,i)=>{
+      // item 0 is where the display starts (cyan); the selected row is the one
+      // the stage is previewing and ADJUST is editing (acid)
+      const row=document.createElement('div');
+      row.className='pl-row'+(i===0?' first':'')+((cur&&cur.id===it.id)?' sel':'');
+      row.title='Click to preview this item and edit its look';
+      row.onclick=(e)=>{ if(e.target.classList.contains('pl-btn')) return; selectPlItem(s, it.id); };
+      const idx=document.createElement('span'); idx.className='pl-idx';
+      idx.textContent=String(i+1).padStart(2,'0');
+      const gl=document.createElement('span'); gl.className='pl-glyph';
+      gl.textContent=(it.kind==='video')?'▶':'▦';
+      const nm=document.createElement('span'); nm.className='pl-name';
+      nm.textContent=it.name||'media';
+      nm.title=it.name||'media';
+      const ctrls=document.createElement('span'); ctrls.className='pl-ctrls';
+      const up=document.createElement('span'); up.className='pl-btn'; up.textContent='↑'; up.title='Move earlier';
+      const dn=document.createElement('span'); dn.className='pl-btn'; dn.textContent='↓'; dn.title='Move later';
+      const rm=document.createElement('span'); rm.className='pl-btn rm'; rm.textContent='×'; rm.title='Remove from playlist';
+      up.onclick=()=>plMoveItem(s,i,-1);
+      dn.onclick=()=>plMoveItem(s,i,1);
+      rm.onclick=()=>plRemoveItem(s,i);
+      ctrls.append(up,dn,rm);
+      row.append(idx,gl,nm,ctrls);
+      list.appendChild(row);
+    });
+  } else {
+    const e=document.createElement('div'); e.className='pl-empty';
+    e.textContent=s?'No media — drop a file or ＋ Add':'Select a surface';
+    list.appendChild(e);
+  }
+  const cfg=pl||{transition:'cut',xfDur:1,imgDur:8};
+  document.getElementById('plTransLabel').textContent=
+    (cfg.transition==='fadeblack'?'FADE TO BLACK':cfg.transition.toUpperCase());
+  selTransition.value=cfg.transition;
+  rngXfDur.value=Math.round(cfg.xfDur*10);
+  document.getElementById('lblXfDur').textContent=cfg.xfDur.toFixed(1)+'s';
+  document.getElementById('rowXfDur').style.display=(cfg.transition==='cut')?'none':'flex';
+  rngImgDur.value=cfg.imgDur;
+  document.getElementById('lblImgDur').textContent=cfg.imgDur+'s';
+  // duration rows only matter with 2+ items, transitions too
+  document.getElementById('rowImgDur').style.display=(pl && pl.items.some(it=>it.kind!=='video'))?'flex':'none';
+}
 
 // reflect the selected surface's adjustments in the panel
 function syncAdjustUI(){
   const s=surfaces.find(s=>s.id===selId);
-  const a=(s && s.adjust) ? s.adjust : DEF_ADJUST;
+  const a=adjustTarget(s) || DEF_ADJUST;
+  // say plainly what these sliders are about to change
+  const it=selItem(s);
+  const tgt=document.getElementById('adjTarget');
+  tgt.textContent = it ? (it.name||'ITEM') : 'SURFACE';
+  tgt.title = it ? 'Editing this playlist item’s look' : 'No media — this is the surface default, inherited by clips you add';
   document.getElementById('adjBr').value=Math.round(a.br*100);
   document.getElementById('lblBr').textContent=Math.round(a.br*100);
   document.getElementById('adjCt').value=Math.round(a.ct*100);
@@ -1556,6 +2085,8 @@ window.addEventListener('keydown',e=>{
   else if(e.key==='c'||e.key==='C') recenterSel();
   else if(e.key==='o'||e.key==='O') setOutlines(!outputShowOutlines);
   else if(e.key==='h'||e.key==='H') setHandles(!handlesVisible);
+  else if(e.key===']') bringToFront();
+  else if(e.key==='[') sendToBack();
   else if(e.key==='Delete'||e.key==='Backspace') deleteSel();
   else if(e.key==='Escape'){ selId=null; updateUI(); }
 });
@@ -1591,6 +2122,7 @@ if(IS_FILE && !safeGet('throw_file_tip')){
 // Read-only views over module state for tests/interaction.spec.js. `let`
 // bindings aren't window properties, so the tests couldn't see them otherwise.
 Object.defineProperty(window,'surfaces',{get:()=>surfaces});
+Object.defineProperty(window,'selId',{get:()=>selId});
 Object.defineProperty(window,'stageW',{get:()=>stageW});
 Object.defineProperty(window,'stageH',{get:()=>stageH});
 Object.defineProperty(window,'outputShowOutlines',{get:()=>outputShowOutlines});

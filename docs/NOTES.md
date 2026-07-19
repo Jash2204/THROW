@@ -69,6 +69,16 @@ The editor draws ≤512 px thumbnails; videos contribute a single captured frame
 - `H` hides handles entirely, and hidden handles are **not grabbable** — an invisible corner-drag would warp the mesh with no visible cause, so with handles off every drag is a whole-surface move. Visibility and grabbability travel together.
 - Surfaces may sit partly or fully off-stage (off-stage = not projected). No auto-clamping — parking media off-stage during calibration is legitimate. `C` re-centers a lost surface on demand.
 
+## 7a · Playlists: content-addressed items, state-driven order
+
+Playlist item blobs cross the channel ONCE, addressed by item id; order, transition type, and durations ride the (tiny, diffed) state broadcast. Consequence: reordering or removing items in an 80MB-per-clip playlist costs zero bytes of media transfer, and a display tab that reconnects gets everything replayed idempotently. The scheduler lives in the display (it owns playback): videos advance on their real `ended` event, images on a timer; crossfades render BOTH items as two GL passes on the same mesh with complementary opacity multipliers, so every blend mode and adjustment still applies during the fade. Inactive items sit paused at frame 0 — they consume no decode budget until their turn.
+
+## 7a2 · The look lives on the playlist item, not the surface
+
+A surface is a *place on the wall*; a playlist item is *the thing being shown there*. Brightness/contrast/colour/hue/flips describe the thing, so they live on the item — which means two clips on one surface can look completely different, and a crossfade renders each pass with its own look instead of a single surface-wide filter. The surface keeps one `adjust` as a **seed**: it's what the ADJUST panel edits while a surface has no media, and what new items inherit, so the "calibrate the surface once and every clip matches" workflow survives.
+
+Two consequences worth noting. Flips moved from the mesh UVs into a shader uniform (`v_uv = abs(u_flip - a_uv)` — `abs(0-uv)=uv`, `abs(1-uv)=1-uv`), because per-item flips would otherwise need a mesh per item; this also dropped flips out of the mesh cache key, so one mesh now serves every item. And the previewed item is remembered **per surface** (`s._selItem`) rather than in one global, because a global lets you select surface B, click its item 3, switch back to A, and leave ADJUST editing a different item than the stage is previewing.
+
 ## 7b · Image adjustments: composite-time, both renderers
 
 Per-surface brightness/contrast/saturation/hue apply at COMPOSITE time — canvas `filter` in the editor, the same math as shader uniforms in the display GL path — so dragging a slider never invalidates a warp cache or rebuilds a mesh. Flips are the exception: they mirror the media *within* the mesh, which is a UV change, so they participate in the warp/mesh cache keys. One validator gotcha worth remembering: `Number(x) || default` silently destroys legitimate zeros (brightness 0 = black, saturation 0 = grayscale); the sanitiser uses `Number.isFinite` instead.
@@ -83,6 +93,10 @@ Local-only tool; zero network calls beyond the local server serving its own file
 ## 9 · Testing strategy
 
 Playwright covers what synthetic events can prove: drag semantics, hit priority, canvas state isolation, presets, thumbnails, off-stage freedom, JSON round-trip/rejection, and **cross-tab sync** (editor and display as two same-origin pages exchanging geometry and media over the channel). Hardware truths — fullscreen on a projector, decode stalls, occlusion behaviour — live in `TESTING.md` as a manual checklist, plus the lesson from §2: anything involving real video must additionally be verified in a *user-launched* browser, because automation flags change media behaviour.
+
+## 9b · The decode ceiling is real, and it is not ours to fix
+
+4K120 sources stutter, and no amount of renderer work changes that: a single hardware decode block (NVDEC/QuickSync/VCN) is typically specified around 4K60 per stream, so 4K120 either exceeds its throughput or isn't supported for that profile at all — at which point Chrome silently falls back to **software** decode and the CPU is the bottleneck. A native app would use the same decoder and hit the same wall; this is hardware, not browser sandboxing. It's also self-inflicted: a 1080p projector throws away three quarters of a 4K frame and half of a 120fps stream, so the "quality" being buffered is quality that physically cannot reach the wall. THROW's honest answer is the stall watchdog (§2b) — detect the frozen `currentTime`, say plainly that this is the decode limit, and point at 1080p sources. The only real in-app fix would be transcoding on import (WebCodecs decode → re-encode at stage resolution), which is a genuine feature, not a bug fix.
 
 ## 10 · Why not an app
 

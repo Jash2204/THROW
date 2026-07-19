@@ -1,12 +1,12 @@
 {
   "name": "throw-mapper",
   "version": "1.0.0",
-  "description": "Tiled Homographic Rendering Onto Walls — a zero-install, single-file browser projection mapper. This package.json exists only for the Playwright test suite; the app itself has zero dependencies.",
+  "description": "Tiled Homographic Rendering Onto Walls — a zero-install browser projection mapper. This package.json exists only for the Playwright test suite; the app itself has zero runtime dependencies.",
   "scripts": {
     "test": "playwright test tests/interaction.spec.js"
   },
-  "author": "Jash",
-  "license": "MIT",
+  "author": "Jash Patel",
+  "license": "AGPL-3.0-or-later",
   "devDependencies": {
     "@playwright/test": "^1.61.1"
   }

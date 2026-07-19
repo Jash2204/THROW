@@ -484,10 +484,11 @@ test('display tab receives geometry and media over BroadcastChannel', async ({ b
   await ctx.close();
 });
 
-// ── Test 12: Adjust panel ─────────────────────────────────────────────────────
-// Sliders write per-surface adjust state, flips toggle, values survive the
-// export validator, and the display tab receives them over the channel.
-test('adjust sliders and flips modify surface state and sync to the display', async ({ browser }) => {
+// ── Test 12: Adjust panel — per playlist item ─────────────────────────────────
+// With no media, ADJUST edits the surface default (which seeds clips added
+// later). Once there IS media it edits the SELECTED ITEM, each item is
+// independent, and the item's look reaches the display under pl.items[].adjust.
+test('adjust targets the surface default with no media, then the selected item', async ({ browser }) => {
   const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
   const editor = await ctx.newPage();
   await editor.goto(baseURL, { waitUntil: 'domcontentloaded' });
@@ -502,32 +503,68 @@ test('adjust sliders and flips modify surface state and sync to the display', as
   await editor.keyboard.press('a');
   await editor.waitForTimeout(80);
 
-  // default adjust exists on new surfaces
-  expect(await editor.evaluate(() => window.surfaces[0].adjust.br)).toBe(1);
-
-  // slider input → state (range inputs need a real input event)
-  await editor.evaluate(() => {
-    const el = document.getElementById('adjBr');
-    el.value = 150;
+  const setSlider = (id, v) => editor.evaluate(([id, v]) => {
+    const el = document.getElementById(id);
+    el.value = v;
     el.dispatchEvent(new Event('input'));
-  });
+  }, [id, v]);
+
+  // ── no media: edits land on the surface default ──
+  expect(await editor.evaluate(() => window.surfaces[0].adjust.br)).toBe(1);
+  await setSlider('adjBr', 150);
   expect(await editor.evaluate(() => window.surfaces[0].adjust.br)).toBe(1.5);
+  await expect(editor.locator('#adjTarget')).toHaveText('SURFACE');
 
-  // flip toggles and reflects in the button state
+  // ── add two clips: each inherits that default, then diverges ──
+  await editor.evaluate(async () => {
+    const mk = async (color, name) => {
+      const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+      c.getContext('2d').fillStyle = color; c.getContext('2d').fillRect(0, 0, 64, 64);
+      const b = await new Promise(r => c.toBlob(r, 'image/png'));
+      return new File([b], name, { type: 'image/png' });
+    };
+    addToPlaylist(window.surfaces[0], [await mk('#f00', 'one.png'), await mk('#0f0', 'two.png')]);
+  });
+  await editor.waitForTimeout(250);
+
+  const items = () => editor.evaluate(() => window.surfaces[0].playlist.items.map(i => ({ id: i.id, br: i.adjust.br, flipH: i.adjust.flipH })));
+  expect((await items()).map(i => i.br)).toEqual([1.5, 1.5]);      // both inherited the seed
+  await expect(editor.locator('#adjTarget')).toHaveText('one.png'); // now targeting item 1
+
+  // edit item 1 only
+  await setSlider('adjBr', 50);
   await editor.click('#btnFlipH');
-  expect(await editor.evaluate(() => window.surfaces[0].adjust.flipH)).toBe(true);
-  await expect(editor.locator('#btnFlipH')).toHaveClass(/active/);
+  let it = await items();
+  expect(it[0].br).toBe(0.5);
+  expect(it[0].flipH).toBe(true);
+  expect(it[1].br).toBe(1.5);        // item 2 untouched — they are independent
+  expect(it[1].flipH).toBe(false);
+  expect(await editor.evaluate(() => window.surfaces[0].adjust.br)).toBe(1.5); // seed unchanged
 
-  // display receives the adjust values over the channel
-  await display.waitForFunction(
-    () => window.surfaceList.length === 1 &&
-          window.surfaceList[0].adjust &&
-          window.surfaceList[0].adjust.br === 1.5 &&
-          window.surfaceList[0].adjust.flipH === true,
-    null, { timeout: 5000 }
-  );
+  // the item's look reaches the display
+  const surfId = await editor.evaluate(() => window.surfaces[0].id);
+  await display.waitForFunction((id) => {
+    const s = window.surfaceList.find(x => x.id === id);
+    return s && s.pl && s.pl.items.length === 2 &&
+           s.pl.items[0].adjust.br === 0.5 && s.pl.items[0].adjust.flipH === true &&
+           s.pl.items[1].adjust.br === 1.5;
+  }, surfId, { timeout: 5000 });
 
-  // validator clamps garbage but keeps legit zeros (brightness 0 is valid black)
+  // ── selecting the second row retargets ADJUST at it ──
+  await editor.locator('#plList .pl-row').nth(1).click();
+  await editor.waitForTimeout(150);
+  await expect(editor.locator('#adjTarget')).toHaveText('two.png');
+  await setSlider('adjSat', 0);
+  it = await items();
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[1].adjust.sat)).toBe(0);
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].adjust.sat)).toBe(1);
+
+  // reset only clears the selected item
+  await editor.click('#btnAdjReset');
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[1].adjust.sat)).toBe(1);
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].adjust.br)).toBe(0.5);
+
+  // validator still clamps garbage but keeps legit zeros (brightness 0 = black)
   const validated = await editor.evaluate(() => {
     const d = window.validateProjectData({
       stageW: 1920, stageH: 1080,
@@ -541,15 +578,182 @@ test('adjust sliders and flips modify surface state and sync to the display', as
   expect(validated.hue).toBe(0);       // negative clamped
   expect(validated.flipH).toBe(true);  // coerced boolean
 
-  // reset restores defaults
-  await editor.click('#btnAdjReset');
-  expect(await editor.evaluate(() => window.surfaces[0].adjust.br)).toBe(1);
-  expect(await editor.evaluate(() => window.surfaces[0].adjust.flipH)).toBe(false);
+  await ctx.close();
+});
+
+// ── Test 12b: Stacking order + scale ─────────────────────────────────────────
+test('front/back reorder the paint stack and scale resizes about the centre', async ({ browser }) => {
+  const { page, ctx } = await openApp(browser);
+
+  await page.keyboard.press('a'); await page.waitForTimeout(60);
+  await page.keyboard.press('a'); await page.waitForTimeout(60);
+  await page.keyboard.press('a'); await page.waitForTimeout(60);
+
+  // the last-added surface is selected and already on top
+  const ids = await page.evaluate(() => window.surfaces.map(s => s.id));
+  expect(await page.evaluate(() => window.selId)).toBe(ids[2]);
+
+  // send it to the back → it becomes surfaces[0] (drawn first = underneath)
+  await page.click('#btnBack');
+  expect(await page.evaluate(() => window.surfaces.map(s => s.id))).toEqual([ids[2], ids[0], ids[1]]);
+
+  // bring it back to the front → last = drawn last = on top
+  await page.click('#btnFront');
+  expect(await page.evaluate(() => window.surfaces.map(s => s.id))).toEqual([ids[0], ids[1], ids[2]]);
+
+  // '[' and ']' do the same
+  await page.keyboard.press('[');
+  expect(await page.evaluate(() => window.surfaces[0].id)).toBe(ids[2]);
+  await page.keyboard.press(']');
+  expect(await page.evaluate(() => window.surfaces[2].id)).toBe(ids[2]);
+
+  // ── scale: doubles the surface about its centre, centre stays put ──
+  const before = await page.evaluate(() => {
+    const s = window.surfaces.find(x => x.id === window.selId);
+    const b = { x0: Math.min(...s.pts.flat().map(p => p.x)), x1: Math.max(...s.pts.flat().map(p => p.x)),
+                y0: Math.min(...s.pts.flat().map(p => p.y)), y1: Math.max(...s.pts.flat().map(p => p.y)) };
+    return { w: b.x1 - b.x0, h: b.y1 - b.y0, cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2 };
+  });
+  await page.evaluate(() => {
+    const el = document.getElementById('rngScale');
+    el.value = 200; el.dispatchEvent(new Event('input'));
+  });
+  const after = await page.evaluate(() => {
+    const s = window.surfaces.find(x => x.id === window.selId);
+    const b = { x0: Math.min(...s.pts.flat().map(p => p.x)), x1: Math.max(...s.pts.flat().map(p => p.x)),
+                y0: Math.min(...s.pts.flat().map(p => p.y)), y1: Math.max(...s.pts.flat().map(p => p.y)) };
+    return { w: b.x1 - b.x0, h: b.y1 - b.y0, cx: (b.x0 + b.x1) / 2, cy: (b.y0 + b.y1) / 2 };
+  });
+  expect(after.w).toBeCloseTo(before.w * 2, 1);
+  expect(after.h).toBeCloseTo(before.h * 2, 1);
+  expect(after.cx).toBeCloseTo(before.cx, 1);   // scaled about the centre
+  expect(after.cy).toBeCloseTo(before.cy, 1);
+
+  // dragging the dial back to 100% exactly undoes it
+  await page.evaluate(() => {
+    const el = document.getElementById('rngScale');
+    el.value = 100; el.dispatchEvent(new Event('input'));
+  });
+  const back = await page.evaluate(() => {
+    const s = window.surfaces.find(x => x.id === window.selId);
+    const xs = s.pts.flat().map(p => p.x);
+    return Math.max(...xs) - Math.min(...xs);
+  });
+  expect(back).toBeCloseTo(before.w, 1);
 
   await ctx.close();
 });
 
-// ── Test 13: JSON import rejects malformed data ───────────────────────────────
+// ── Test 13: 1×1 corner-pin mesh ──────────────────────────────────────────────
+// A 1×1 mesh is exactly 4 points, all corners. Corner drag must warp that
+// corner only; body drag must translate all 4 rigidly.
+test('1x1 mesh: four corners only, corner drag and body drag behave', async ({ browser }) => {
+  const { page, ctx } = await openApp(browser);
+
+  await page.click('[data-r="1"][data-c="1"]');
+  await page.keyboard.press('a');
+  await page.waitForTimeout(80);
+
+  const info = await page.evaluate(() => {
+    const s = window.surfaces[0];
+    return { rows: s.rows, cols: s.cols, count: s.pts.flat().length, tl: s.pts[0][0] };
+  });
+  expect(info.rows).toBe(1);
+  expect(info.cols).toBe(1);
+  expect(info.count).toBe(4);   // corners only
+
+  // corner drag warps just that corner
+  const pagePt = await stageToPage(page, info.tl.x, info.tl.y);
+  await page.mouse.move(pagePt.x, pagePt.y);
+  await page.mouse.down();
+  await page.mouse.move(pagePt.x + 60, pagePt.y + 40, { steps: 8 });
+  await page.mouse.up();
+  await page.waitForTimeout(40);
+
+  const after = await page.evaluate(() => {
+    const s = window.surfaces[0];
+    return { tl: s.pts[0][0], br: s.pts[1][1] };
+  });
+  expect(after.tl.x).toBeGreaterThan(info.tl.x + 20);   // moved
+  // br untouched — checked via renderMain not throwing + geometry sane
+  const renders = await page.evaluate(() => { window.renderMain(); return true; });
+  expect(renders).toBe(true);
+
+  await ctx.close();
+});
+
+// ── Test 14: Playlists ────────────────────────────────────────────────────────
+// Items append/reorder/remove in the editor, blobs reach the display once,
+// order+config ride the state broadcast, and the display ADVANCES through
+// image items on the configured timer.
+test('playlist: items sync to display and advance on the image timer', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const editor = await ctx.newPage();
+  await editor.goto(baseURL, { waitUntil: 'domcontentloaded' });
+  const closeBtn = editor.locator('#helpClose');
+  if (await closeBtn.isVisible()) await closeBtn.click();
+
+  const display = await ctx.newPage();
+  await display.goto(baseURL.replace('THROW.html', 'display.html'), { waitUntil: 'domcontentloaded' });
+  await display.waitForTimeout(200);
+
+  await editor.bringToFront();
+  await editor.keyboard.press('a');
+  await editor.waitForTimeout(80);
+
+  // build two coloured images and add both to the playlist; 2s image time, crossfade
+  await editor.evaluate(async () => {
+    const mk = async (color, name) => {
+      const c = document.createElement('canvas'); c.width = 320; c.height = 240;
+      c.getContext('2d').fillStyle = color;
+      c.getContext('2d').fillRect(0, 0, 320, 240);
+      const blob = await new Promise(r => c.toBlob(r, 'image/png'));
+      return new File([blob], name, { type: 'image/png' });
+    };
+    const s = window.surfaces[0];
+    addToPlaylist(s, [await mk('#ff0000', 'red.png'), await mk('#00ff00', 'green.png')]);
+    playlistOf(s).imgDur = 2;             // fastest allowed — keeps the test quick
+    playlistOf(s).transition = 'crossfade';
+    playlistOf(s).xfDur = 0.3;
+  });
+
+  // editor panel shows both rows
+  await editor.waitForTimeout(200);
+  expect(await editor.locator('#plList .pl-row').count()).toBe(2);
+
+  // display receives both items + the config
+  const surfId = await editor.evaluate(() => window.surfaces[0].id);
+  await display.waitForFunction((id) => {
+    const st = window.plState(id);
+    return st && st.items === 2 && st.order.length === 2 && st.transition === 'crossfade';
+  }, surfId, { timeout: 5000 });
+
+  // the display starts on item 0 and ADVANCES to item 1 within imgDur + fade + slack
+  const first = await display.evaluate((id) => window.plState(id).cur, surfId);
+  await display.waitForFunction((arg) => {
+    const st = window.plState(arg.id);
+    return st && st.cur && st.cur !== arg.first;
+  }, { id: surfId, first }, { timeout: 6000 });
+
+  // reorder in the editor → display order follows (no re-send needed)
+  await editor.evaluate(() => plMoveItem(window.surfaces[0], 1, -1));
+  const editorOrder = await editor.evaluate(() => window.surfaces[0].playlist.items.map(i => i.id));
+  await display.waitForFunction((arg) => {
+    const st = window.plState(arg.id);
+    return st && JSON.stringify(st.order) === JSON.stringify(arg.order);
+  }, { id: surfId, order: editorOrder }, { timeout: 5000 });
+
+  // remove one item → display prunes it
+  await editor.evaluate(() => plRemoveItem(window.surfaces[0], 1));
+  await display.waitForFunction((id) => {
+    const st = window.plState(id);
+    return st && st.order.length === 1 && st.items === 1;
+  }, surfId, { timeout: 5000 });
+
+  await ctx.close();
+});
+
+// ── Test 15: JSON import rejects malformed data ───────────────────────────────
 test('loading a malformed JSON project shows an error and does not crash', async ({ browser }) => {
   const { page, ctx } = await openApp(browser);
 

@@ -11,7 +11,7 @@ Warp images and looping videos onto walls, ceilings, boxes, or any awkward real-
 1. Download the folder (or clone the repo).
 2. Double-click **`start.bat`** — it starts a tiny local server and opens the editor.
 3. Press **`A`** to add a surface, drag corners to warp it, drop media onto it.
-4. Click **`⧉ Display`** (top of the left panel) — a second tab opens. Drag it onto the projector (display set to **Extend**), click **⛶ FULLSCREEN**.
+4. Click **`⧉ Display`** (top-right of the toolbar) — a second tab opens. Drag it onto the projector (display set to **Extend**), click **⛶ FULLSCREEN**.
 5. Calibrate from the editor. Everything syncs live — the projected picture never shifts once you've aligned it.
 
 Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome/Edge). No other dependencies, no build step.
@@ -42,17 +42,21 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 ## Features
 
 - **GPU-accelerated output.** The display renders with WebGL — one texture upload per video frame, one draw call per surface — delivering multiple simultaneous clips at 60 fps (measured: 3 × 4K on a laptop). Normal / Screen / Add / Multiply composite via `blendFunc`; Overlay / Hard Light / Color Dodge fall back to Canvas2D with a visible note. If playback stalls anyway, a watchdog detects the frozen `currentTime` and says plainly: *you're at the hardware decode limit; use 1080p sources* — your projector can't show more anyway.
-- **Mesh warp, 2×2 → 8×8.** Corner-pin at 2×2; step up for curves. Drag yellow corner diamonds or cyan inner dots.
+- **Mesh warp, 1×1 → 8×8.** Pure 4-corner pin at 1×1; step up for curves. Drag yellow corner diamonds or cyan inner dots.
 - **Whole-surface body drag** — click anywhere on a surface (not a handle) to move it rigidly. `H` hides handles entirely for a clean view (drags then always move whole surfaces).
 - **Trace mode** — click around a ceiling panel or beam; THROW fits a warped surface to the outline automatically using a transfinite (Gordon–Coons) interior interpolation.
 - **Broad format support.** Drop anything the browser might decode: mp4, webm, mov, m4v, ogg/ogv, and even mkv/avi/wmv/mpeg attempts; png, jpg, webp, gif, avif, bmp, svg and more. Animated GIF/WebP/AVIF/APNG play frame-accurately via WebCodecs.
 - **Honest error messages.** Failures report the real `MediaError` with a fix tailored to the actual container — an `.mkv` says "convert the container", an HEVC "live wallpaper" `.mp4` says exactly that and points at HandBrake. Errors appear in **both** tabs, whichever one you're watching.
+- **Playlists per surface** — queue multiple images/videos; videos advance when they end, images on a configurable timer. Hand over with **Cut, Crossfade, or Fade-to-black** (adjustable fade time). Item files ship to the display once; reordering is instant.
+- **Per-item looks.** Click any playlist item to preview it on the stage and edit *its* brightness/contrast/colour/hue/flips — each clip keeps its own look, and a crossfade blends the two looks correctly. New clips inherit the surface's look, so "set it once" still works.
+- **Stacking order** — `⤒ Front` / `⤓ Back` (or `]` / `[`) control which surface draws on top where they overlap.
+- **Scale** — resize the selected surface about its centre without touching the warp. The dial is relative to selection time, so dragging back to 100% exactly undoes it.
 - **Layers** with per-surface blend modes (Screen/Add make black project as transparent) and opacity.
-- **Per-surface image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip. The editor previews via CSS canvas filters; the display applies the same math in its WebGL shader. Adjustment sliders never re-warp — they're applied at composite time.
+- **Image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip, per playlist item. The editor previews via CSS canvas filters; the display applies the same math in its WebGL shader. Colour never re-warps (composite-time) and flips are a shader uniform, so one mesh serves every item.
 - **Outlines** (`O`) — project each surface's footprint to line up against real-world edges before the media is final.
 - **Stage presets** — FHD/4K/QHD/HD/WXGA/XGA or custom, remembered across sessions. Match your projector's native resolution for 1:1 pixels in fullscreen.
 - **Off-stage freedom** — surfaces can hang off or sit fully outside the stage (simply not projected). `C` rescues a lost surface.
-- **Save / load** (Project panel) — projects export to `.throw.json` with embedded images (videos re-drop after loading). Imports are schema-validated; a malicious file can't inject anything.
+- **Save / load** (toolbar) — projects export to `.throw.json` with embedded images (videos re-drop after loading). Imports are schema-validated; a malicious file can't inject anything.
 
 ---
 
@@ -65,6 +69,7 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 | `D` (or `L`) | Open the Display tab |
 | `R` | Reset / flatten the selected mesh |
 | `C` | Re-center the selected surface |
+| `]` / `[` | Bring the selected surface to front / send to back |
 | `O` | Toggle outlines on the projected output |
 | `H` | Toggle mesh handles in the editor |
 | `Del` / `Backspace` | Delete selected surface |
@@ -84,7 +89,7 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 
 **Videos look frozen in the editor.** By design — the editor shows a captured frame (note the ▶ badge). They play in the Display tab.
 
-**A surface disappeared.** It's probably off-stage (allowed). Select it in Layers and press `C`.
+**A surface disappeared.** It's probably off-stage (allowed). Select it in the Surfaces rail and press `C`.
 
 **The picture moved when I fullscreened.** Fullscreen the display **before** calibrating, not after — that's the intended flow, and edits sync live either way.
 
@@ -130,4 +135,4 @@ Automated tests cover interaction, state isolation, presets, thumbnails, JSON va
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Use it, sell it, modify it, map it onto a ceiling.
+**GNU AGPL v3** — see [LICENSE](LICENSE). Free to use, study, modify, and share; if you run a modified version as a network service, that version's source must be offered to its users.

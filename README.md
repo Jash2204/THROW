@@ -50,6 +50,12 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 - **Playlists per surface** — queue multiple images/videos; videos advance when they end, images on a configurable timer. Hand over with **Cut, Crossfade, or Fade-to-black** (adjustable fade time). Item files ship to the display once; reordering is instant.
 - **Per-item looks.** Click any playlist item to preview it on the stage and edit *its* brightness/contrast/colour/hue/flips — each clip keeps its own look, and a crossfade blends the two looks correctly. New clips inherit the surface's look, so "set it once" still works.
 - **Stacking order** — `⤒ Front` / `⤓ Back` (or `]` / `[`) control which surface draws on top where they overlap.
+- **Stickers (Trace → mask).** Trace an arbitrary outline and pick *Sticker mask*: the media stays rectangular but is clipped to your shape (WebGL stencil / Canvas2D clip). The mask is stored in mesh-UV, so warping a corner stretches the whole sticker, outline and all.
+- **Per-item crop** — trim a source sub-rectangle (X/Y/W/H %) that the mesh then stretches to fill; a shader/UV op, no re-warp.
+- **Per-item trim** — play only In→Out seconds of a clip; it loops or advances within that window (frame-accurate on the display).
+- **Downscale on import** — one click re-encodes an oversized clip to 1080p WebM using the browser's own `MediaRecorder` (no dependencies). A 4K source drops ~10× in size and plays far smoother; THROW suggests it automatically for >1080p clips.
+- **Undo / redo** (`Ctrl/Cmd+Z`, `Ctrl+Shift+Z`) — snapshots geometry, z-order, and every per-item look/crop/trim; undoing a delete brings the surface and its video back.
+- **Arrow-key nudge** — move the selected surface 1px (Shift = 10px) for fine calibration.
 - **Scale** — resize the selected surface about its centre without touching the warp. The dial is relative to selection time, so dragging back to 100% exactly undoes it.
 - **Layers** with per-surface blend modes (Screen/Add make black project as transparent) and opacity.
 - **Image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip, per playlist item. The editor previews via CSS canvas filters; the display applies the same math in its WebGL shader. Colour never re-warps (composite-time) and flips are a shader uniform, so one mesh serves every item.
@@ -70,6 +76,8 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 | `R` | Reset / flatten the selected mesh |
 | `C` | Re-center the selected surface |
 | `]` / `[` | Bring the selected surface to front / send to back |
+| `←/→/↑/↓` | Nudge the selected surface 1px (Shift = 10px) |
+| `Ctrl/Cmd+Z` · `Ctrl+Shift+Z` | Undo · redo |
 | `O` | Toggle outlines on the projected output |
 | `H` | Toggle mesh handles in the editor |
 | `Del` / `Backspace` | Delete selected surface |
@@ -93,7 +101,7 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 
 **The picture moved when I fullscreened.** Fullscreen the display **before** calibrating, not after — that's the intended flow, and edits sync live either way.
 
-**Playback stalls with a "hardware decode limit" warning.** The GPU can only decode a finite number of simultaneous streams. Switch to 1080p sources — the projector can't show more resolution anyway.
+**Playback stalls with a "hardware decode limit" warning.** A hardware decode block is ~4K60 per stream, so oversized clips fall back to software decode. Select the clip and hit **⤓ Downscale to 1080p** — it re-encodes in-browser to a 1080p WebM (a 4K source shrinks ~10×). Your projector can't show more resolution anyway.
 
 ---
 

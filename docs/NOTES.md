@@ -83,6 +83,22 @@ Two consequences worth noting. Flips moved from the mesh UVs into a shader unifo
 
 Per-surface brightness/contrast/saturation/hue apply at COMPOSITE time — canvas `filter` in the editor, the same math as shader uniforms in the display GL path — so dragging a slider never invalidates a warp cache or rebuilds a mesh. Flips are the exception: they mirror the media *within* the mesh, which is a UV change, so they participate in the warp/mesh cache keys. One validator gotcha worth remembering: `Number(x) || default` silently destroys legitimate zeros (brightness 0 = black, saturation 0 = grayscale); the sanitiser uses `Number.isFinite` instead.
 
+## 7c · Stickers: one mask, two clip paths, deforms with the mesh
+
+A sticker is a surface plus a polygon mask stored in **mesh-UV** (0..1 of its bounding box at trace time). Because the mask lives in UV, `maskStagePts` maps each vertex through the current mesh (`meshMapUV`) — so dragging a corner warps the outline exactly like the media. Two clip implementations, kept in lockstep: Canvas2D (editor + fallback) sets a `clip()` path in `compositeSurface`; WebGL stencils the shape. The stencil path ear-clips the polygon (concave-safe), stamps it into the stencil buffer with colour writes off, then draws the media with `stencilFunc(EQUAL,1)` — and critically resets `disable(STENCIL_TEST)` per unmasked surface so a mask never leaks onto its neighbours (verified with a masked-over-unmasked pixel readback; the first "leak" I saw was a bad sample point in the letterbox, not a real bug).
+
+## 7d · Crop and trim: composite-time and frame-time, not warp-time
+
+Crop is a source sub-rectangle threaded as a per-item vec4: `v_uv = crop.xy + abs(flip - uv) * crop.wh` in the shader, the same arithmetic in the Canvas2D UV functions. It rides in the warp cache key but is otherwise free. Trim (in/out seconds) is the one feature that had to touch the display's video core: the 1.5s stall-watchdog is too coarse, so `tickPlaylists` cues each active clip to its `trimIn` on activation and loops/advances at `trimOut` every frame; native `loop` is disabled whenever a trim window is set so it can't loop the whole file.
+
+## 7e · Transcode on import: the honest 4K fix, zero dependencies
+
+`MediaRecorder` + `canvas.captureStream` are native, so downscaling needs no library: play the source through once, `drawImage` each frame into a target-resolution canvas, record its stream to WebM. Measured on the 4K Mustang clip: **82.7 MB H.264 → 8.5 MB 1080p WebM**, and it plays through the unchanged pipeline. It's real-time (a 12s clip takes ~12s) with a live % on the button, and THROW suggests it automatically for >1080p sources. This is the in-app answer to §9b — the decode ceiling is hardware, but a 1080p projector throws away three-quarters of a 4K frame anyway, so re-encoding removes quality that can't reach the wall.
+
+## 7f · Undo/redo without heavy snapshots
+
+Snapshots are plain JSON — geometry, z-order (the `surfaces` array order), per-item look/crop/trim, mask (as UV). Media never enters a snapshot: items are registered by id in `itemRegistry` and re-linked on restore, so a snapshot is a few KB and undoing a *delete* brings the File/thumbnail/decoded-frame back. Continuous gestures (drags, sliders, number fields) snapshot once at gesture start via a `beginGesture`/`endGesture` armed flag, so a 100-step opacity drag is one undo step; arrow nudges coalesce on an 800ms timer.
+
 ## 8 · Security posture
 
 Local-only tool; zero network calls beyond the local server serving its own files. Untrusted inputs are media files and imported project JSON:

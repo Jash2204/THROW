@@ -167,6 +167,12 @@
   .prop-range.grey{accent-color:#5a6470}
   .sb-val{font:500 10.5px/1 var(--mono);color:var(--ink2);width:34px;text-align:right;flex-shrink:0}
 
+  /* crop grid — four % inputs */
+  .crop-grid{display:grid;grid-template-columns:1fr 1fr;gap:7px}
+  .crop-grid label{display:flex;align-items:center;gap:7px;font:400 11px/1 var(--sans);color:var(--dim)}
+  .crop-grid input{flex:1;width:100%;background:var(--panel2);border:1px solid var(--line);color:var(--ink);font:500 11px/1 var(--mono);padding:6px 8px;border-radius:var(--r);text-align:right;outline:none}
+  .crop-hint{font:400 10px/1.5 var(--sans);color:var(--faint2);margin-top:9px}
+
   /* number fields (custom stage popover) */
   .num-row{display:flex;align-items:center;gap:8px;margin-bottom:7px}
   .num-row .l{font:11px var(--mono);color:var(--dim);flex:1}
@@ -241,11 +247,16 @@
   }
   #placeOverlay.active{display:flex}
   .place-msg{
+    position:relative;z-index:2;   /* above #placeCanvas so the mode buttons are clickable */
     background:var(--panel);border:1px solid var(--amber);border-radius:10px;
     padding:14px 20px;text-align:center;max-width:360px;
   }
-  .place-msg h3{font:13px var(--mono);color:var(--amber);letter-spacing:.08em;margin-bottom:6px}
+  .place-msg h3{font:13px var(--mono);color:var(--amber);letter-spacing:.08em;margin-bottom:10px}
   .place-msg p{font:11px var(--sans);color:var(--dim);line-height:1.6}
+  .trace-mode{display:flex;gap:6px;margin-bottom:11px}
+  .tm-btn{flex:1;padding:7px;border-radius:var(--r);border:1px solid var(--line);background:var(--panel2);color:var(--dim);font:500 11px/1 var(--sans);cursor:pointer;transition:all .12s}
+  .tm-btn:hover{border-color:var(--dim);color:var(--ink)}
+  .tm-btn.active{border-color:var(--amber);background:rgba(255,178,62,.1);color:var(--amber)}
   #placeCanvas{
     position:absolute;inset:0;cursor:crosshair;
   }
@@ -381,7 +392,11 @@
       <canvas id="placeCanvas"></canvas>
       <div class="place-msg">
         <h3>⬡ TRACE MODE</h3>
-        <p>Click to add points around the real-world shape.<br>Right-click or press <b>Enter</b> to close &amp; fit the surface.<br>Press <b>Esc</b> to cancel.</p>
+        <div class="trace-mode">
+          <div class="tm-btn active" id="tmFit" data-mode="fit" title="Warp the mesh so its edges follow the outline">Fit mesh</div>
+          <div class="tm-btn" id="tmMask" data-mode="mask" title="Keep the media rectangular but clip it to the outline — a sticker">Sticker mask</div>
+        </div>
+        <p>Click points around the shape.<br>Right-click or press <b>Enter</b> to close &amp; build.<br>Press <b>Esc</b> to cancel.</p>
       </div>
     </div>
   </div>
@@ -475,6 +490,24 @@
       </div>
     </div>
 
+    <div class="sect" id="cropPanel">
+      <div class="sect-t between">
+        <span>CROP</span>
+        <span class="cyan" id="cropTarget">SURFACE</span>
+      </div>
+      <div class="crop-grid">
+        <label>X<input type="number" id="cropX" min="0" max="100" step="1" value="0"></label>
+        <label>Y<input type="number" id="cropY" min="0" max="100" step="1" value="0"></label>
+        <label>W<input type="number" id="cropW" min="1" max="100" step="1" value="100"></label>
+        <label>H<input type="number" id="cropH" min="1" max="100" step="1" value="100"></label>
+      </div>
+      <div class="row2" style="margin-top:9px">
+        <div class="dbtn mono" id="btnCropSquare" title="Centre square crop — handy for stickers">◻ Square</div>
+        <div class="dbtn mono" id="btnCropReset" title="Show the whole frame">Full frame</div>
+      </div>
+      <div class="crop-hint">Values are % of the source. Crop trims what's shown, then the mesh stretches it to fill.</div>
+    </div>
+
     <div class="sect" id="playlistPanel">
       <div class="sect-t between">
         <span>PLAYLIST</span>
@@ -482,6 +515,16 @@
       </div>
       <div class="pl-list" id="plList"></div>
       <div class="pl-add" id="btnPlAdd" title="Append images/videos — they play in order on the display">＋ Add media</div>
+      <div id="trimRow" style="display:none;margin-top:11px">
+        <div class="sect-t between" style="margin-bottom:8px"><span>TRIM · <span id="trimName" style="color:var(--dim)"></span></span><span class="cyan">SEC</span></div>
+        <div class="crop-grid">
+          <label>In<input type="number" id="trimIn" min="0" step="0.1" value="0"></label>
+          <label>Out<input type="number" id="trimOut" min="0" step="0.1" value="0"></label>
+        </div>
+        <div class="crop-hint">Play only In→Out of this clip (Out 0 = to the end). Loops or advances within the window.</div>
+        <div class="dbtn mono" id="btnDownscale" style="margin-top:9px" title="Re-encode this clip at 1080p — smaller and far smoother when several clips play at once">⤓ Downscale to 1080p</div>
+        <div class="crop-hint" id="downscaleHint" style="display:none"></div>
+      </div>
       <div class="prop-row" style="margin-top:13px">
         <div class="prop-label">Change</div>
         <select class="prop-select" id="selTransition" title="How one item hands over to the next">
@@ -622,11 +665,11 @@ function broadcastState(){
   const snap=JSON.stringify({
     stageW, stageH, outlines: outputShowOutlines,
     surfaces: surfaces.map(s=>({id:s.id, rows:s.rows, cols:s.cols, pts:s.pts,
-                                blend:s.blend, opacity:s.opacity, visible:s.visible,
+                                blend:s.blend, opacity:s.opacity, visible:s.visible, mask:s.mask||null,
                                 // order AND per-item look both ride the state
                                 // diff — still no media bytes re-sent
                                 pl: s.playlist ? {
-                                  items: s.playlist.items.map(it=>({id:it.id, adjust:it.adjust||null})),
+                                  items: s.playlist.items.map(it=>({id:it.id, adjust:it.adjust||null, crop:it.crop||null, trimIn:it.trimIn||0, trimOut:it.trimOut||0})),
                                   transition: s.playlist.transition,
                                   xfDur: s.playlist.xfDur,
                                   imgDur: s.playlist.imgDur
@@ -726,6 +769,9 @@ function editorEl(m){ return m.animCanvas || m.thumb || m.el || null; }
 function editorAdjust(s){
   return (s.media && s.media.item && s.media.item.adjust) || s.adjust || DEF_ADJUST;
 }
+function editorCrop(s){
+  return (s.media && s.media.item && s.media.item.crop) || null;
+}
 
 function mediaReady(s){
   const m=s.media; if(!m) return false;
@@ -735,27 +781,43 @@ function mediaReady(s){
   return el.complete && el.naturalWidth>0;
 }
 
+function clipToMask(dst, s){
+  const mp = s.mask && maskStagePts(s);
+  if(!mp) return false;
+  dst.save();
+  dst.beginPath();
+  dst.moveTo(mp[0].x,mp[0].y);
+  for(let i=1;i<mp.length;i++) dst.lineTo(mp[i].x,mp[i].y);
+  dst.closePath(); dst.clip();
+  return true;
+}
+
 function renderSurface(s, target){
   if(!s.visible) return;
   const dst = target || ctx;
   if(!mediaReady(s)){
-    drawPlaceholderTo(dst, s);   // visible while empty / still loading
+    // clip the calibration target to the sticker shape so an empty sticker
+    // still reads as its outline, not a full rectangle
+    const clipped=clipToMask(dst, s);
+    drawPlaceholderTo(dst, s);
+    if(clipped) dst.restore();
     return;
   }
   const el = editorEl(s.media);
   const adj = editorAdjust(s);
+  const crop = editorCrop(s);
   if(s.media.animCanvas){
     // animated frames change every tick — caching would be a lie
-    renderSurfaceTo(dst, s, el, stageW, stageH, adj);
+    renderSurfaceTo(dst, s, el, stageW, stageH, adj, crop);
     return;
   }
   // Static media (image thumbs, video poster frames): re-warp only when the
-  // mesh/stage/media/flips actually change. Blend, opacity and colour apply at
-  // composite time, so those sliders never trigger a re-warp.
-  const key = warpKey(s, el, stageW, stageH, adj);
+  // mesh/stage/media/flips/crop actually change. Blend, opacity and colour apply
+  // at composite time, so those sliders never trigger a re-warp.
+  const key = warpKey(s, el, stageW, stageH, adj, crop);
   if(s._warpKey !== key){
     if(!s._warpBuf) s._warpBuf = document.createElement('canvas');
-    warpInto(s._warpBuf, s, el, stageW, stageH, adj);
+    warpInto(s._warpBuf, s, el, stageW, stageH, adj, crop);
     s._warpKey = key;
   }
   compositeSurface(dst, s._warpBuf, s, adj);
@@ -967,6 +1029,7 @@ IC.addEventListener('pointermove', e=>{
   pressMoved=true;
   const s=surfaces.find(s=>s.id===dragHandle.surfId);
   if(!s) return;
+  beginGesture();
   if(dragHandle.type==='center' || dragHandle.type==='body'){
     // Rigid translate of the entire surface — no deformation.
     const dx=x-dragOffset.x, dy=y-dragOffset.y;
@@ -981,6 +1044,7 @@ IC.addEventListener('pointermove', e=>{
 
 IC.addEventListener('pointerup', e=>{
   dragHandle=null;
+  endGesture();
   try{ IC.releasePointerCapture(e.pointerId); }catch(_){}
 });
 
@@ -1047,10 +1111,15 @@ function makeVideoThumb(s, item){
   };
   const snap=()=>{
     if(done) return; done=true;
+    item._srcH=v.videoHeight||0;   // for the downscale hint / suggestion
     const t=makeThumb(v);
     if(t){
       item._thumb=t;   // cached on the item so re-selecting it is instant
       if(s.media && s.media.file===file){ s.media.thumb=t; updateUI(); }
+    }
+    if(item._srcH>1140 && !item._dsSuggested){
+      item._dsSuggested=true;
+      toast('“'+(item.name||'clip')+'” is '+item._srcH+'p — ⤓ Downscale it for smoother playback', 3200);
     }
     cleanup();
   };
@@ -1080,9 +1149,15 @@ function playlistOf(s){ if(!s.playlist) s.playlist=defaultPlaylist(); return s.p
 // Every item carries its own LOOK. New items inherit the surface's default
 // (s.adjust) so "set it once, every clip matches" still works — after that each
 // item is edited independently.
-function mkItem(file, seed){
-  return {id:plUid(), file, name:file.name||'media', kind:isVideoFile(file)?'video':'image',
-          adjust:{...DEF_ADJUST, ...(seed||{})}};
+// Every media item is registered by id so undo/redo can snapshot playlists as
+// plain JSON (ids + looks) and re-link the heavy File/thumbnail objects on
+// restore — including items removed by a delete the user then undoes.
+const itemRegistry=new Map();
+function regItem(it){ if(it&&it.id) itemRegistry.set(it.id, it); return it; }
+function mkItem(file, seed, cropSeed){
+  return regItem({id:plUid(), file, name:file.name||'media', kind:isVideoFile(file)?'video':'image',
+          adjust:{...DEF_ADJUST, ...(seed||{})}, crop:{...DEF_CROP, ...(cropSeed||{})},
+          trimIn:0, trimOut:0});   // seconds; trimOut 0 = play to the end
 }
 
 // ── Which item is being edited/previewed ──────
@@ -1183,8 +1258,9 @@ function loadMediaToSurface(s,file){
   if(!ok.length) return;
   const pl=playlistOf(s);
   const seed=s.adjust;   // keep the surface's established look
+  pushUndo();
   freeMedia(s);
-  pl.items=[mkItem(ok[0], seed)];
+  pl.items=[mkItem(ok[0], seed, s.cropSeed)];
   s.name=(ok[0].name||'media').replace(/\.[^.]+$/,'').substring(0,18);
   s._selItem=pl.items[0].id;
   buildEditorMedia(s, pl.items[0]);
@@ -1197,9 +1273,10 @@ function addToPlaylist(s, files){
   if(!s){ toast('Select a surface first'); return; }
   const ok=acceptableFiles(files);
   if(!ok.length) return;
+  pushUndo();
   const pl=playlistOf(s);
   const wasEmpty=pl.items.length===0;
-  for(const f of ok) pl.items.push(mkItem(f, s.adjust));   // new clips inherit the surface look
+  for(const f of ok) pl.items.push(mkItem(f, s.adjust, s.cropSeed));   // new clips inherit the surface look/crop
   if(wasEmpty){
     s.name=(ok[0].name||'media').replace(/\.[^.]+$/,'').substring(0,18);
     s._selItem=pl.items[0].id;
@@ -1213,10 +1290,12 @@ function plMoveItem(s, i, d){
   const pl=playlistOf(s);
   const j=i+d;
   if(j<0 || j>=pl.items.length) return;
+  pushUndo();
   [pl.items[i], pl.items[j]]=[pl.items[j], pl.items[i]];
   updateUI();   // selection follows the item by id; order rides the state broadcast
 }
 function plRemoveItem(s, i){
+  pushUndo();
   const pl=playlistOf(s);
   const [gone]=pl.items.splice(i,1);
   if(gone && gone.id===s._selItem){        // was previewing the one just removed
@@ -1244,6 +1323,7 @@ document.getElementById('btnPlAdd').onclick=()=>{
 
 // ── Add surface ───────────────────────────────
 function addSurface(){
+  pushUndo();
   const cx=stageW/2, cy=stageH/2;
   const w=stageW*0.35, h=stageH*0.35;
   const rows=currentMeshRows(), cols=currentMeshCols();
@@ -1261,6 +1341,7 @@ document.getElementById('btnDel').onclick=deleteSel;
 document.getElementById('btnDup').onclick=()=>{
   const s=surfaces.find(s=>s.id===selId);
   if(!s) return;
+  pushUndo();
   const clone=JSON.parse(JSON.stringify(s));
   clone.id=uid(); clone.name=s.name+' copy';
   // offset clone
@@ -1274,8 +1355,9 @@ document.getElementById('btnDup').onclick=()=>{
   // Playlist items get FRESH ids (JSON cloning destroyed the File refs).
   if(s.playlist){
     clone.playlist={transition:s.playlist.transition, xfDur:s.playlist.xfDur, imgDur:s.playlist.imgDur,
-      items:s.playlist.items.map(it=>({id:plUid(), file:it.file, src:it.src, name:it.name, kind:it.kind,
-                                       adjust:{...DEF_ADJUST, ...(it.adjust||{})},
+      items:s.playlist.items.map(it=>regItem({id:plUid(), file:it.file, src:it.src, name:it.name, kind:it.kind,
+                                       adjust:{...DEF_ADJUST, ...(it.adjust||{})}, crop:{...DEF_CROP, ...(it.crop||{})},
+                                       trimIn:it.trimIn||0, trimOut:it.trimOut||0,
                                        _thumb:it._thumb, _animCanvas:it._animCanvas, _sniffed:it._sniffed}))};
     clone._selItem=clone.playlist.items.length?clone.playlist.items[0].id:null;
   }
@@ -1294,6 +1376,7 @@ function freeMedia(s){
 }
 function deleteSel(){
   if(!selId) return;
+  pushUndo();
   const s=surfaces.find(x=>x.id===selId); freeMedia(s);
   surfaces=surfaces.filter(s=>s.id!==selId);
   selId=surfaces.length?surfaces[surfaces.length-1].id:null;
@@ -1310,6 +1393,7 @@ document.getElementById('btnResetMesh').onclick=()=>resetSelMesh();
 function resetSelMesh(){
   const s=surfaces.find(s=>s.id===selId);
   if(!s){ toast('Select a surface first'); return; }
+  pushUndo();
   const b=surfaceBBox(s);
   s.pts=makeGrid(s.rows,s.cols,b.x,b.y,b.w,b.h);
   toast('Mesh flattened (R)');
@@ -1321,9 +1405,20 @@ function resetSelMesh(){
 function recenterSel(){
   const s=surfaces.find(s=>s.id===selId);
   if(!s){ toast('Select a surface first'); return; }
+  pushUndo();
   const w=stageW*0.5, h=stageH*0.5;
   s.pts=makeGrid(s.rows,s.cols,(stageW-w)/2,(stageH-h)/2,w,h);
   toast('Surface re-centered (C)');
+}
+
+// Rigid translate of the selected surface (arrow-key nudge). dx/dy in stage px.
+function translateSel(dx, dy){
+  const s=surfaces.find(s=>s.id===selId);
+  if(!s) return false;
+  for(let r=0;r<=s.rows;r++) for(let c=0;c<=s.cols;c++){
+    s.pts[r][c].x+=dx; s.pts[r][c].y+=dy;
+  }
+  return true;
 }
 
 // ── Mesh point selector ───────────────────────
@@ -1337,6 +1432,7 @@ document.getElementById('meshSel').querySelectorAll('.mgbtn').forEach(btn=>{
     // Apply to selected surface
     const s=surfaces.find(s=>s.id===selId);
     if(!s) return;
+    pushUndo();
     const rows=parseInt(btn.dataset.r), cols=parseInt(btn.dataset.c);
     const b=surfaceBBox(s);
     s.rows=rows; s.cols=cols;
@@ -1347,9 +1443,10 @@ document.getElementById('meshSel').querySelectorAll('.mgbtn').forEach(btn=>{
 
 // ── Properties panel ──────────────────────────
 document.getElementById('selBlend').onchange=function(){
-  const s=surfaces.find(s=>s.id===selId); if(s) s.blend=this.value;
+  const s=surfaces.find(s=>s.id===selId); if(s){ pushUndo(); s.blend=this.value; }
 };
 document.getElementById('rngOpacity').oninput=function(){
+  beginGesture();
   const v=parseInt(this.value);
   document.getElementById('lblOpacity').textContent=v+'%';
   const s=surfaces.find(s=>s.id===selId); if(s) s.opacity=v/100;
@@ -1458,7 +1555,9 @@ function updateUI(){
   }
   syncScaleUI();
   syncAdjustUI();
+  syncCropUI();
   syncPlaylistUI();
+  syncTrimUI();
   document.getElementById('statusText').textContent=
     surfaces.length===0?'No surfaces — press A to add':
     selId?`${s?.name||'?'} — ${s?.rows||0}×${s?.cols||0} mesh · ${s?.blend||'normal'}`:`${surfaces.length} surface(s)`;
@@ -1569,6 +1668,22 @@ function validateProjectData(data){
         flipH: !!a.flipH, flipV: !!a.flipV
       };
     } else sd.adjust=null;
+    // sanitise crop: normalised 0..1, kept inside the source frame
+    if(sd.crop && typeof sd.crop==='object'){
+      const c=sd.crop;
+      const n01=(v,def)=>{ v=Number(v); return Number.isFinite(v)?Math.max(0,Math.min(1,v)):def; };
+      let x=n01(c.x,0), y=n01(c.y,0), w=n01(c.w,1), h=n01(c.h,1);
+      if(w<=0) w=1; if(h<=0) h=1;
+      if(x+w>1) w=1-x; if(y+h>1) h=1-y;
+      sd.crop={x,y,w,h};
+    } else sd.crop=null;
+    // sanitise sticker mask: an array of {u,v} in 0..1 (need ≥3 to be a polygon)
+    if(Array.isArray(sd.mask) && sd.mask.length>=3){
+      sd.mask=sd.mask.map(m=>({
+        u: Math.max(0,Math.min(1, Number(m&&m.u)||0)),
+        v: Math.max(0,Math.min(1, Number(m&&m.v)||0))
+      }));
+    } else sd.mask=null;
     // sanitise playlist config (items never persist in JSON)
     if(sd.playlist && typeof sd.playlist==='object'){
       const p=sd.playlist;
@@ -1594,9 +1709,10 @@ document.getElementById('btnSave').onclick=function(){
   const promises=surfaces.map(async s=>({
     id:s.id, name:s.name, rows:s.rows, cols:s.cols,
     pts:s.pts, refX:s.refX, refY:s.refY, refW:s.refW, refH:s.refH,
-    // the look that round-trips is the one on the item actually being embedded
-    blend:s.blend, opacity:s.opacity, visible:s.visible,
+    // the look/crop that round-trip are the ones on the item being embedded
+    blend:s.blend, opacity:s.opacity, visible:s.visible, mask:s.mask||null,
     adjust:(selItem(s)&&selItem(s).adjust)||s.adjust||null,
+    crop:(selItem(s)&&selItem(s).crop)||s.cropSeed||null,
     playlist:s.playlist?{transition:s.playlist.transition, xfDur:s.playlist.xfDur, imgDur:s.playlist.imgDur}:null,
     mediaSrc:s.media? await toDataURL(editorEl(s.media),s.media.type):null,
     mediaType:s.media?s.media.type:null
@@ -1644,9 +1760,9 @@ document.getElementById('fileLoad').addEventListener('change',function(){
           img.addEventListener('load',()=>{ if(s.media && s.media.el===img){ s.media.thumb=makeThumb(img); updateUI(); } });
           img.src=sd.mediaSrc;
           s.media={type:'image',el:img,src:sd.mediaSrc};
-          // the saved surface look becomes the restored item's look
-          s.playlist.items=[{id:plUid(), src:sd.mediaSrc, name:s.name||'image', kind:'image',
-                             adjust:{...DEF_ADJUST, ...(sd.adjust||{})}}];
+          // the saved surface look/crop become the restored item's
+          s.playlist.items=[regItem({id:plUid(), src:sd.mediaSrc, name:s.name||'image', kind:'image',
+                             adjust:{...DEF_ADJUST, ...(sd.adjust||{})}, crop:{...DEF_CROP, ...(sd.crop||{})}})];
           s._selItem=s.playlist.items[0].id;
           bcSendPlaylist(s);   // restored image → Display tab (as data: URL)
         }
@@ -1665,16 +1781,24 @@ document.getElementById('fileLoad').addEventListener('change',function(){
 
 document.getElementById('btnClear').onclick=()=>{
   if(!confirm('Clear all surfaces?')) return;
+  pushUndo();
   surfaces.forEach(freeMedia);
   surfaces=[]; selId=null; updateUI();
 };
 
-// ── Place Mode (ceiling fit) ──────────────────
+// ── Place Mode (ceiling fit / sticker mask) ───
 let placeMode=false;
 let placePts=[];
+let traceMode='fit';   // 'fit' = warp mesh to outline · 'mask' = rectangular sticker clipped to outline
 const placeOverlay=document.getElementById('placeOverlay');
 const placeCanvas=document.getElementById('placeCanvas');
 const pctx=placeCanvas.getContext('2d');
+[document.getElementById('tmFit'), document.getElementById('tmMask')].forEach(btn=>{
+  btn.onclick=()=>{
+    traceMode=btn.dataset.mode;
+    document.querySelectorAll('.tm-btn').forEach(b=>b.classList.toggle('active', b===btn));
+  };
+});
 
 function enterPlaceMode(){
   placeMode=true; placePts=[];
@@ -1739,6 +1863,7 @@ placeCanvas.addEventListener('contextmenu', e=>{
 });
 
 function fitSurfaceToPoints(){
+  pushUndo();
   // Convert place canvas coords → stage coords
   const r=stageEl.getBoundingClientRect();
   const sc=stageScale();
@@ -1752,22 +1877,35 @@ function fitSurfaceToPoints(){
   const w=x1-x0, h=y1-y0;
 
   const rows=currentMeshRows(), cols=currentMeshCols();
-  // Build a surface whose boundary follows the placed polygon
-  // For N≥4 points: map corners to nearest polygon vertex; fill interior by barycentric interp
+
+  if(traceMode==='mask'){
+    // STICKER: rectangular mesh over the polygon's bounding box, media undistorted,
+    // clipped to the traced outline. Store the polygon in mesh-UV so it warps with
+    // the mesh — drag a corner and the whole sticker (outline included) stretches.
+    const s=makeSurface(x0,y0,w,h,rows,cols);
+    s.name='Sticker';
+    s.mask=stagePts.map(p=>({
+      u: w>0 ? Math.max(0,Math.min(1,(p.x-x0)/w)) : 0,
+      v: h>0 ? Math.max(0,Math.min(1,(p.y-y0)/h)) : 0
+    }));
+    surfaces.push(s);
+    selId=s.id;
+    updateUI();
+    toast('Sticker traced — drop media onto it, drag corners to place');
+    return;
+  }
+
+  // FIT: build a surface whose mesh boundary follows the placed polygon.
   const s=makeSurface(x0,y0,w,h,rows,cols);
   s.name='Placed shape';
-
-  // Snap mesh outer boundary to the polygon outline
   if(stagePts.length>=4){
     applyPolygonToMeshBoundary(s, stagePts);
   } else if(stagePts.length===3){
-    // triangle: snap corners
     s.pts[0][0]={...stagePts[0]};
     s.pts[0][s.cols]={...stagePts[1]};
     s.pts[s.rows][s.cols]={...stagePts[2]};
     s.pts[s.rows][0]={x:(stagePts[0].x+stagePts[2].x)/2,y:(stagePts[0].y+stagePts[2].y)/2};
   }
-  // Relax inner points
   relaxInnerPoints(s);
   surfaces.push(s);
   selId=s.id;
@@ -1890,6 +2028,7 @@ function bringToFront(){
   const i=surfaces.findIndex(s=>s.id===selId);
   if(i<0){ toast('Select a surface first'); return; }
   if(i===surfaces.length-1){ toast('Already at the front'); return; }
+  pushUndo();
   surfaces.push(surfaces.splice(i,1)[0]);
   updateUI(); toast('Moved to front');
 }
@@ -1897,6 +2036,7 @@ function sendToBack(){
   const i=surfaces.findIndex(s=>s.id===selId);
   if(i<0){ toast('Select a surface first'); return; }
   if(i===0){ toast('Already at the back'); return; }
+  pushUndo();
   surfaces.unshift(surfaces.splice(i,1)[0]);
   updateUI(); toast('Moved to back');
 }
@@ -1920,6 +2060,7 @@ function scaleSurface(s, f){
 }
 const rngScale=document.getElementById('rngScale');
 rngScale.oninput=function(){
+  beginGesture();
   const v=+this.value;
   document.getElementById('lblScale').textContent=v+'%';
   const s=surfaces.find(s=>s.id===selId);
@@ -1927,6 +2068,93 @@ rngScale.oninput=function(){
   scaleSurface(s, v/_scaleLast);
   _scaleLast=v;
 };
+
+// ── Undo / redo ───────────────────────────────
+// Snapshots are plain JSON: geometry, config, z-order and per-item looks. Media
+// (File refs, thumbnails, decoded frames) is immutable and re-linked by id from
+// itemRegistry on restore, so snapshots stay tiny and an undo of a delete brings
+// the blobs back. pushUndo() is called at the START of each edit gesture.
+let _undo=[], _redo=[], _restoring=false;
+const UNDO_MAX=80;
+function snapshot(){
+  return JSON.stringify({
+    stageW, stageH, selId,
+    surfaces: surfaces.map(s=>({
+      id:s.id, rows:s.rows, cols:s.cols, pts:s.pts,
+      blend:s.blend, opacity:s.opacity, visible:s.visible, name:s.name, mask:s.mask?s.mask.map(m=>({u:m.u,v:m.v})):null,
+      adjust:{...(s.adjust||DEF_ADJUST)}, cropSeed:s.cropSeed?{...s.cropSeed}:null, sel:s._selItem||null,
+      pl: s.playlist ? {
+        transition:s.playlist.transition, xfDur:s.playlist.xfDur, imgDur:s.playlist.imgDur,
+        items:s.playlist.items.map(it=>({id:it.id, adjust:{...(it.adjust||DEF_ADJUST)}, crop:{...(it.crop||DEF_CROP)}, trimIn:it.trimIn||0, trimOut:it.trimOut||0}))
+      } : null
+    }))
+  });
+}
+function pushUndo(){
+  if(_restoring) return;
+  _undo.push(snapshot());
+  if(_undo.length>UNDO_MAX) _undo.shift();
+  _redo.length=0;
+}
+function restore(json){
+  const st=JSON.parse(json);
+  _restoring=true;
+  try{
+    stageW=st.stageW; stageH=st.stageH;
+    document.getElementById('stageW').value=stageW;
+    document.getElementById('stageH').value=stageH;
+    resizeStage(stageW,stageH); syncStagePresetUI();
+    surfaces = st.surfaces.map(ss=>{
+      const s={ id:ss.id, rows:ss.rows, cols:ss.cols, pts:ss.pts,
+                blend:ss.blend, opacity:ss.opacity, visible:ss.visible, name:ss.name,
+                adjust:{...ss.adjust}, cropSeed:ss.cropSeed?{...ss.cropSeed}:null, mask:ss.mask||null, media:null, _selItem:ss.sel };
+      if(ss.pl){
+        s.playlist={transition:ss.pl.transition, xfDur:ss.pl.xfDur, imgDur:ss.pl.imgDur,
+          items: ss.pl.items.map(pit=>{
+            const it=itemRegistry.get(pit.id);
+            if(!it) return null;
+            it.adjust={...pit.adjust};       // look + crop + trim are what changed
+            if(pit.crop) it.crop={...pit.crop};
+            if('trimIn' in pit) it.trimIn=pit.trimIn;
+            if('trimOut' in pit) it.trimOut=pit.trimOut;
+            it._sent=false;                  // force a resend — display may have pruned it
+            return it;
+          }).filter(Boolean)};
+      }
+      return s;
+    });
+    selId = surfaces.some(s=>s.id===st.selId) ? st.selId
+          : (surfaces.length?surfaces[surfaces.length-1].id:null);
+    const cur=surfaces.find(s=>s.id===selId);
+    if(cur && cur.playlist && cur.playlist.items.length){
+      if(!cur.playlist.items.some(it=>it.id===cur._selItem)) cur._selItem=cur.playlist.items[0].id;
+      buildEditorMedia(cur, selItem(cur));
+    }
+    for(const s of surfaces) if(s.playlist) bcSendPlaylist(s, true);   // repopulate the display
+    _scaleSelId=null;   // rewind the scale dial for the restored selection
+  } finally {
+    _restoring=false;
+  }
+  updateUI();
+}
+function undo(){
+  if(!_undo.length){ toast('Nothing to undo'); return; }
+  _redo.push(snapshot());
+  restore(_undo.pop());
+  toast('Undo');
+}
+function redo(){
+  if(!_redo.length){ toast('Nothing to redo'); return; }
+  _undo.push(snapshot());
+  restore(_redo.pop());
+  toast('Redo');
+}
+// Continuous gestures (canvas drags, sliders) snapshot ONCE at the start, so a
+// 100-step opacity drag is a single undo. beginGesture() is idempotent within a
+// gesture; endGesture() re-arms it.
+let _gestureArmed=true;
+function beginGesture(){ if(_gestureArmed){ pushUndo(); _gestureArmed=false; } }
+function endGesture(){ _gestureArmed=true; }
 function syncScaleUI(){
   // only rewind the dial when the selection actually changes
   if(_scaleSelId===selId) return;
@@ -1939,12 +2167,14 @@ function syncScaleUI(){
 // Per-surface colour adjustments + flips. Colour applies at composite time
 // (editor: canvas filter; display: GL uniforms) so sliders never re-warp.
 const DEF_ADJUST={br:1, ct:1, sat:1, hue:0, flipH:false, flipV:false};
+const DEF_CROP={x:0, y:0, w:1, h:1};   // full source frame (normalised)
 // Edits land on the SELECTED PLAYLIST ITEM (adjustTarget), so two clips on one
 // surface can look completely different — and a crossfade keeps each one's look.
 function adjustOf(s){ return adjustTarget(s); }
 function bindAdjust(sliderId, labelId, prop, toVal, toLabel){
   const el=document.getElementById(sliderId), lbl=document.getElementById(labelId);
   el.oninput=function(){
+    beginGesture();
     lbl.textContent=toLabel(this.value);
     const s=surfaces.find(s=>s.id===selId);
     const a=adjustOf(s);
@@ -1955,22 +2185,196 @@ bindAdjust('adjBr','lblBr','br',   v=>v/100, v=>v);
 bindAdjust('adjCt','lblCt','ct',   v=>v/100, v=>v);
 bindAdjust('adjSat','lblSat','sat',v=>v/100, v=>v);
 bindAdjust('adjHue','lblHue','hue',v=>+v,    v=>v+'°');
+['rngOpacity','adjBr','adjCt','adjSat','adjHue','rngScale','rngXfDur','rngImgDur'].forEach(id=>{
+  document.getElementById(id).addEventListener('change', endGesture);
+});
 
 const btnFlipH=document.getElementById('btnFlipH');
 const btnFlipV=document.getElementById('btnFlipV');
 btnFlipH.onclick=()=>{
   const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
-  const a=adjustOf(s); a.flipH=!a.flipH; updateUI();
+  pushUndo(); const a=adjustOf(s); a.flipH=!a.flipH; updateUI();
 };
 btnFlipV.onclick=()=>{
   const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
-  const a=adjustOf(s); a.flipV=!a.flipV; updateUI();
+  pushUndo(); const a=adjustOf(s); a.flipV=!a.flipV; updateUI();
 };
 document.getElementById('btnAdjReset').onclick=()=>{
   const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
+  pushUndo();
   const it=selItem(s);
   if(it) it.adjust={...DEF_ADJUST}; else s.adjust={...DEF_ADJUST};
   updateUI(); toast(it?'Reset: '+(it.name||'item'):'Adjustments reset');
+};
+
+// ── Crop panel ────────────────────────────────
+// Like ADJUST, crop targets the SELECTED ITEM (or the surface seed with no
+// media). Stored normalised 0..1; the UI works in %.
+function cropTargetOf(s){
+  if(!s) return null;
+  const it=selItem(s);
+  if(it){ if(!it.crop) it.crop={...DEF_CROP}; return it.crop; }
+  if(!s.cropSeed) s.cropSeed={...DEF_CROP};
+  return s.cropSeed;
+}
+const cropX=document.getElementById('cropX'), cropY=document.getElementById('cropY');
+const cropW=document.getElementById('cropW'), cropH=document.getElementById('cropH');
+function readCropUI(){
+  // clamp so the rect stays inside the source (x+w ≤ 100)
+  let x=Math.max(0,Math.min(99, +cropX.value||0));
+  let y=Math.max(0,Math.min(99, +cropY.value||0));
+  let w=Math.max(1,Math.min(100, +cropW.value||100));
+  let h=Math.max(1,Math.min(100, +cropH.value||100));
+  if(x+w>100) w=100-x;
+  if(y+h>100) h=100-y;
+  return {x:x/100, y:y/100, w:w/100, h:h/100};
+}
+function applyCropFromUI(){
+  const s=surfaces.find(s=>s.id===selId);
+  if(!s){ syncCropUI(); toast('Select a surface first'); return; }
+  const c=cropTargetOf(s);
+  const nc=readCropUI();
+  Object.assign(c, nc);
+  syncCropUI();   // reflect any clamping
+}
+[cropX,cropY,cropW,cropH].forEach(inp=>{
+  inp.addEventListener('focus', ()=>{ beginGesture(); });
+  inp.addEventListener('input', applyCropFromUI);
+  inp.addEventListener('change', ()=>{ applyCropFromUI(); endGesture(); });
+});
+document.getElementById('btnCropSquare').onclick=()=>{
+  const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
+  pushUndo();
+  // largest centred square in the SOURCE aspect (based on the previewed media)
+  const el=s.media && editorEl(s.media);
+  const mw=(el&&(el.videoWidth||el.naturalWidth||el.width))||1;
+  const mh=(el&&(el.videoHeight||el.naturalHeight||el.height))||1;
+  const c=cropTargetOf(s);
+  if(mw>=mh){ const w=mh/mw; Object.assign(c,{x:(1-w)/2,y:0,w:w,h:1}); }
+  else{ const h=mw/mh; Object.assign(c,{x:0,y:(1-h)/2,w:1,h:h}); }
+  updateUI(); toast('Square crop');
+};
+document.getElementById('btnCropReset').onclick=()=>{
+  const s=surfaces.find(s=>s.id===selId); if(!s){ toast('Select a surface first'); return; }
+  pushUndo();
+  Object.assign(cropTargetOf(s), DEF_CROP);
+  updateUI(); toast('Full frame');
+};
+function syncCropUI(){
+  const s=surfaces.find(s=>s.id===selId);
+  const c=cropTargetOf(s) || DEF_CROP;
+  cropX.value=Math.round(c.x*100); cropY.value=Math.round(c.y*100);
+  cropW.value=Math.round(c.w*100); cropH.value=Math.round(c.h*100);
+  const it=selItem(s);
+  const tgt=document.getElementById('cropTarget');
+  tgt.textContent = it ? (it.name||'ITEM') : 'SURFACE';
+}
+
+// ── Trim (video items only) ───────────────────
+const trimInEl=document.getElementById('trimIn'), trimOutEl=document.getElementById('trimOut');
+function applyTrimFromUI(){
+  const s=surfaces.find(s=>s.id===selId); const it=selItem(s);
+  if(!it || it.kind!=='video') return;
+  it.trimIn=Math.max(0, +trimInEl.value||0);
+  it.trimOut=Math.max(0, +trimOutEl.value||0);
+}
+[trimInEl,trimOutEl].forEach(inp=>{
+  inp.addEventListener('focus', ()=>beginGesture());
+  inp.addEventListener('input', applyTrimFromUI);
+  inp.addEventListener('change', ()=>{ applyTrimFromUI(); endGesture(); });
+});
+function syncTrimUI(){
+  const s=surfaces.find(s=>s.id===selId); const it=selItem(s);
+  const row=document.getElementById('trimRow');
+  if(it && it.kind==='video'){
+    row.style.display='block';
+    document.getElementById('trimName').textContent=it.name||'clip';
+    trimInEl.value=it.trimIn||0; trimOutEl.value=it.trimOut||0;
+    const hint=document.getElementById('downscaleHint');
+    if(it._srcH && it._srcH>1140){
+      hint.style.display='block';
+      hint.textContent='Source is '+it._srcH+'p — larger than a 1080p projector can show. Downscaling makes multi-clip playback much smoother.';
+    } else hint.style.display='none';
+  } else {
+    row.style.display='none';
+  }
+}
+
+// ── Transcode on import (native MediaRecorder — zero deps) ────────
+// The honest fix for 4K/120fps stutter: a hardware decode block is ~4K60 per
+// stream, so oversized clips fall back to software decode. Re-encoding at the
+// projector's resolution removes quality that physically can't reach the wall
+// anyway. This plays the source through ONCE, drawing each frame into a
+// target-size canvas whose captureStream() feeds a WebM recorder.
+function transcodeVideo(file, targetH, onProgress){
+  return new Promise((resolve, reject)=>{
+    if(typeof MediaRecorder==='undefined'){ reject(new Error('this browser has no MediaRecorder')); return; }
+    const url=typedBlobURL(file, true);
+    const v=document.createElement('video');
+    v.muted=true; v.playsInline=true; v.preload='auto';
+    let raf=0, settled=false;
+    const cleanup=()=>{ try{ cancelAnimationFrame(raf); }catch(_){}
+      try{ v.pause(); v.removeAttribute('src'); v.load(); }catch(_){}
+      try{ URL.revokeObjectURL(url); }catch(_){} };
+    const fail=(e)=>{ if(settled) return; settled=true; cleanup(); reject(e instanceof Error?e:new Error(String(e))); };
+    v.addEventListener('error', ()=>fail(new Error(mediaErrText(v.error?v.error.code:0))));
+    v.addEventListener('loadedmetadata', ()=>{
+      const sw=v.videoWidth, sh=v.videoHeight, dur=v.duration||0;
+      if(!sw||!sh){ fail(new Error('could not read the video dimensions')); return; }
+      const scale=Math.min(1, targetH/sh);
+      const tw=Math.max(2, Math.round(sw*scale/2)*2), th=Math.max(2, Math.round(sh*scale/2)*2);
+      const cv=document.createElement('canvas'); cv.width=tw; cv.height=th;
+      const g=cv.getContext('2d'); g.imageSmoothingQuality='high';
+      let rec, chunks=[];
+      try{
+        const stream=cv.captureStream(30);
+        const mime = MediaRecorder.isTypeSupported('video/webm;codecs=vp9') ? 'video/webm;codecs=vp9'
+                   : MediaRecorder.isTypeSupported('video/webm;codecs=vp8') ? 'video/webm;codecs=vp8' : 'video/webm';
+        rec=new MediaRecorder(stream, {mimeType:mime, videoBitsPerSecond:8000000});
+      }catch(err){ fail(new Error('recording not supported: '+err.message)); return; }
+      rec.ondataavailable=e=>{ if(e.data&&e.data.size) chunks.push(e.data); };
+      rec.onstop=()=>{ if(settled) return; settled=true; cleanup();
+        chunks.length ? resolve(new Blob(chunks,{type:'video/webm'})) : reject(new Error('no frames captured')); };
+      rec.onerror=()=>fail(new Error('the recorder failed'));
+      const loop=()=>{
+        if(settled) return;
+        try{ g.drawImage(v,0,0,tw,th); }catch(_){}
+        if(onProgress && dur) onProgress(Math.min(0.999, v.currentTime/dur));
+        raf=requestAnimationFrame(loop);
+      };
+      v.addEventListener('ended', ()=>{ cancelAnimationFrame(raf); try{ rec.stop(); }catch(_){ fail(new Error('could not finish encoding')); } });
+      try{ rec.start(); }catch(err){ fail(err); return; }
+      v.play().then(loop).catch(fail);
+    });
+    v.src=url;
+  });
+}
+
+let _transcoding=false;
+document.getElementById('btnDownscale').onclick=async ()=>{
+  if(_transcoding){ toast('Already transcoding…'); return; }
+  const s=surfaces.find(s=>s.id===selId); const it=selItem(s);
+  if(!it || it.kind!=='video' || !it.file){ toast('Select a video clip first'); return; }
+  const targetH=Math.min(1080, stageH||1080);
+  const nm=it.name||'clip';
+  _transcoding=true;
+  const btn=document.getElementById('btnDownscale');
+  btn.textContent='Transcoding… 0%';
+  try{
+    const blob=await transcodeVideo(it.file, targetH, p=>{ btn.textContent='Transcoding… '+Math.round(p*100)+'%'; });
+    pushUndo();
+    it.file=new File([blob], nm.replace(/\.[^.]+$/,'')+'_'+targetH+'p.webm', {type:'video/webm'});
+    it._thumb=null; it._sent=false; it._sniffed=true; it._srcH=targetH;
+    if(s.media && s.media.item===it) buildEditorMedia(s, it);
+    bcSendPlaylist(s, true);
+    updateUI();
+    toast('Downscaled '+nm+' to '+targetH+'p — smaller & smoother');
+  }catch(err){
+    showError('Couldn’t transcode '+nm, err.message);
+  }finally{
+    _transcoding=false;
+    btn.textContent='⤓ Downscale to 1080p';
+  }
 };
 
 // ── Playlist panel ────────────────────────────
@@ -1979,15 +2383,17 @@ const rngXfDur=document.getElementById('rngXfDur');
 const rngImgDur=document.getElementById('rngImgDur');
 selTransition.onchange=function(){
   const s=surfaces.find(s=>s.id===selId); if(!s) return;
-  playlistOf(s).transition=this.value;
+  pushUndo(); playlistOf(s).transition=this.value;
   syncPlaylistUI();
 };
 rngXfDur.oninput=function(){
+  beginGesture();
   const v=this.value/10;
   document.getElementById('lblXfDur').textContent=v.toFixed(1)+'s';
   const s=surfaces.find(s=>s.id===selId); if(s) playlistOf(s).xfDur=v;
 };
 rngImgDur.oninput=function(){
+  beginGesture();
   document.getElementById('lblImgDur').textContent=this.value+'s';
   const s=surfaces.find(s=>s.id===selId); if(s) playlistOf(s).imgDur=+this.value;
 };
@@ -2078,6 +2484,24 @@ window.addEventListener('keydown',e=>{
     if(e.key==='Backspace'&&placePts.length>0){ placePts.pop(); drawPlaceCanvas(); }
     return;
   }
+  // Undo / redo — Ctrl/Cmd+Z, and Shift+Z or Ctrl+Y to redo
+  if((e.ctrlKey||e.metaKey) && (e.key==='z'||e.key==='Z')){ e.preventDefault(); e.shiftKey?redo():undo(); return; }
+  if((e.ctrlKey||e.metaKey) && (e.key==='y'||e.key==='Y')){ e.preventDefault(); redo(); return; }
+  // Arrow keys nudge the selected surface: 1px, or 10px with Shift. A burst of
+  // nudges within 800ms collapses into a single undo step.
+  const ARROWS={ArrowLeft:[-1,0], ArrowRight:[1,0], ArrowUp:[0,-1], ArrowDown:[0,1]};
+  if(ARROWS[e.key]){
+    const [ux,uy]=ARROWS[e.key];
+    const step=e.shiftKey?10:1;
+    if(surfaces.some(s=>s.id===selId)){
+      const now=Date.now();
+      if(now-(window._lastNudge||0) > 800) pushUndo();
+      window._lastNudge=now;
+      translateSel(ux*step, uy*step);
+      e.preventDefault();
+    }
+    return;
+  }
   if(e.key==='a'||e.key==='A') addSurface();
   else if(e.key==='p'||e.key==='P') enterPlaceMode();
   else if(e.key==='d'||e.key==='D'||e.key==='l'||e.key==='L') openDisplay();
@@ -2123,6 +2547,9 @@ if(IS_FILE && !safeGet('throw_file_tip')){
 // bindings aren't window properties, so the tests couldn't see them otherwise.
 Object.defineProperty(window,'surfaces',{get:()=>surfaces});
 Object.defineProperty(window,'selId',{get:()=>selId});
+window.undo=undo; window.redo=redo; window.pushUndo=pushUndo;
+Object.defineProperty(window,'undoDepth',{get:()=>_undo.length});
+Object.defineProperty(window,'placePtsLen',{get:()=>placePts.length});
 Object.defineProperty(window,'stageW',{get:()=>stageW});
 Object.defineProperty(window,'stageH',{get:()=>stageH});
 Object.defineProperty(window,'outputShowOutlines',{get:()=>outputShowOutlines});

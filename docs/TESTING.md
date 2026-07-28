@@ -58,6 +58,16 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 - [ ] Remove the currently-playing item — playback recovers onto a remaining item
 - [ ] Single-video playlist still loops seamlessly (no flash at the loop point)
 
+## 4a1 · Stickers, crop, trim, transcode, nudge, undo
+
+- [ ] **Sticker:** Trace → *Sticker mask* → click an outline → Enter. Drop media on it: it's clipped to the shape. Drag a corner — the outline stretches with the mesh. Verify on the display too (WebGL stencil).
+- [ ] **Two surfaces, one masked:** the mask must NOT clip the other surface (no stencil leak)
+- [ ] **Crop:** set X/Y/W/H % on a selected item — the media shows only that region, stretched to fill; W past the edge clamps; ◻ Square and Full frame work
+- [ ] **Trim:** on a video item set In/Out — the display plays only that window and loops/advances within it; the row is hidden for images
+- [ ] **Downscale:** add a >1080p clip → a suggestion toast appears → **⤓ Downscale to 1080p** shows live %, then the clip is a smaller 1080p WebM that still plays (needs a real H.264-capable browser, not the test runner)
+- [ ] **Nudge:** arrows move the selected surface 1px, Shift = 10px
+- [ ] **Undo/redo:** Ctrl+Z / Ctrl+Shift+Z reverses add, delete (restores the video), mesh change, front/back, scale, crop, trim, sticker trace; a slider drag is one step
+
 ## 4a2 · Stacking, scale & per-item looks
 
 - [ ] Overlap two surfaces — `⤒ Front` / `⤓ Back` (and `]` / `[`) change which one covers the other, in the editor AND the display

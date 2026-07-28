@@ -131,6 +131,56 @@ function biquad(tl,tr,bl,br,u,v){
 function subdivFor(s){
   return Math.max(1, Math.round(6 / Math.max(s.rows, s.cols)));
 }
+
+// ── Sticker masks ─────────────────────────────────────────────────
+// A surface's mask is a polygon stored in mesh-UV (0..1 of its bounding box at
+// trace time), so it warps WITH the mesh. meshMapUV maps any (u,v) through the
+// full mesh to stage coordinates; maskStagePts gives the mask outline in stage
+// space for clipping/stencilling.
+function meshMapUV(s, u, v){
+  u=Math.max(0,Math.min(1,u)); v=Math.max(0,Math.min(1,v));
+  const c=Math.min(s.cols-1, Math.floor(u*s.cols));
+  const r=Math.min(s.rows-1, Math.floor(v*s.rows));
+  const lu=u*s.cols-c, lv=v*s.rows-r;
+  return biquad(s.pts[r][c], s.pts[r][c+1], s.pts[r+1][c], s.pts[r+1][c+1], lu, lv);
+}
+function maskStagePts(s){
+  if(!s.mask || s.mask.length<3) return null;
+  return s.mask.map(m=>meshMapUV(s, m.u, m.v));
+}
+// Ear-clipping triangulation (handles concave polygons). Returns a flat
+// [x0,y0, x1,y1, ...] of triangle vertices, or [] if degenerate.
+function _pointInTri(p,a,b,c){
+  const d1=sign2(p.x,p.y,a,b), d2=sign2(p.x,p.y,b,c), d3=sign2(p.x,p.y,c,a);
+  const neg=(d1<0)||(d2<0)||(d3<0), pos=(d1>0)||(d2>0)||(d3>0);
+  return !(neg&&pos);
+}
+function earClip(pts){
+  const n=pts.length;
+  if(n<3) return [];
+  let idx=[...Array(n).keys()];
+  let area=0; for(let i=0;i<n;i++){ const a=pts[i], b=pts[(i+1)%n]; area+=a.x*b.y-b.x*a.y; }
+  if(area<0) idx.reverse();   // want CCW
+  const out=[]; let guard=0;
+  while(idx.length>2 && guard++ < n*n+8){
+    let clipped=false;
+    for(let i=0;i<idx.length;i++){
+      const a=pts[idx[(i-1+idx.length)%idx.length]], b=pts[idx[i]], c=pts[idx[(i+1)%idx.length]];
+      if((b.x-a.x)*(c.y-a.y)-(b.y-a.y)*(c.x-a.x) <= 0) continue;   // reflex, not an ear
+      let ok=true;
+      for(let j=0;j<idx.length;j++){
+        const q=pts[idx[j]];
+        if(q===a||q===b||q===c) continue;
+        if(_pointInTri(q,a,b,c)){ ok=false; break; }
+      }
+      if(!ok) continue;
+      out.push(a.x,a.y, b.x,b.y, c.x,c.y);
+      idx.splice(i,1); clipped=true; break;
+    }
+    if(!clipped) break;   // degenerate — bail with what we have
+  }
+  return out;
+}
 function dist(ax,ay,bx,by){ return Math.sqrt((ax-bx)**2+(ay-by)**2) }
 function sign2(px,py,a,b){ return (b.x-a.x)*(py-a.y)-(b.y-a.y)*(px-a.x) }
 function pointInQuad(px,py,a,b,c,d){
@@ -182,10 +232,17 @@ const _octx = _off.getContext('2d');
 // compositing (so triangle seams never double-blend). Split out from the
 // composite step so callers can CACHE the warped buffer: a static image only
 // needs re-warping when the mesh moves, not every frame.
+// Normalise a crop rect (source sub-rectangle, 0..1) to a safe default.
+function cropRect(c){
+  if(c && c.w>0 && c.h>0) return {x:c.x||0, y:c.y||0, w:c.w, h:c.h};
+  return {x:0, y:0, w:1, h:1};
+}
+
 // `adj` is the LOOK being rendered — brightness/contrast/saturation/hue/flips.
-// It is passed in rather than read off the surface because each playlist item
-// carries its own, and a crossfade draws two different looks in one frame.
-function warpInto(buf, s, el, stageW, stageH, adj){
+// `crop` selects a source sub-rectangle (0..1) mapped across the whole mesh.
+// Both are passed in rather than read off the surface because each playlist item
+// carries its own, and a crossfade draws two different items in one frame.
+function warpInto(buf, s, el, stageW, stageH, adj, crop){
   if(buf.width!==stageW || buf.height!==stageH){ buf.width=stageW; buf.height=stageH; }
   const g = buf.getContext('2d');
   g.setTransform(1,0,0,1,0,0);
@@ -198,11 +255,13 @@ function warpInto(buf, s, el, stageW, stageH, adj){
   const mw = el.videoWidth || el.naturalWidth || el.width;
   const mh = el.videoHeight || el.naturalHeight || el.height;
   const sub = subdivFor(s);
-  // Flips mirror the media WITHIN the mesh — the geometry itself stays put
+  // Crop selects the visible source region; flips mirror WITHIN that region.
+  // Matches the display's shader: crop.xy + abs(flip - uv) * crop.wh.
+  const cr = cropRect(crop);
   const fH = !!(adj && adj.flipH);
   const fV = !!(adj && adj.flipV);
-  const U = (u)=> (fH ? 1-u : u) * mw;
-  const V = (v)=> (fV ? 1-v : v) * mh;
+  const U = (u)=> ( cr.x + (fH ? 1-u : u)*cr.w ) * mw;
+  const V = (v)=> ( cr.y + (fV ? 1-v : v)*cr.h ) * mh;
 
   for(let r=0;r<s.rows;r++){
     for(let c=0;c<s.cols;c++){
@@ -245,6 +304,14 @@ function adjustFilter(a){
 function compositeSurface(dst, buf, s, adj){
   dst.save();
   try{
+    // sticker mask: clip the composite to the traced polygon (warped with mesh)
+    const mp=maskStagePts(s);
+    if(mp){
+      dst.beginPath();
+      dst.moveTo(mp[0].x,mp[0].y);
+      for(let i=1;i<mp.length;i++) dst.lineTo(mp[i].x,mp[i].y);
+      dst.closePath(); dst.clip();
+    }
     dst.globalCompositeOperation = s.blend==='add' ? 'lighter' : (s.blend||'normal');
     dst.globalAlpha = (typeof s.opacity==='number') ? s.opacity : 1;
     const f=adjustFilter(adj);
@@ -256,19 +323,19 @@ function compositeSurface(dst, buf, s, adj){
 }
 
 // Convenience: warp + composite in one call (uncached path).
-function renderSurfaceTo(dst, s, el, stageW, stageH, adj){
-  warpInto(_off, s, el, stageW, stageH, adj);
+function renderSurfaceTo(dst, s, el, stageW, stageH, adj, crop){
+  warpInto(_off, s, el, stageW, stageH, adj, crop);
   compositeSurface(dst, _off, s, adj);
 }
 
 // Cache key for a warped buffer: changes when anything that affects the WARP
 // changes (geometry, mesh density, stage size, media identity). Blend and
 // opacity are deliberately NOT included — they apply at composite time.
-function warpKey(s, el, stageW, stageH, adj){
-  const a=adj||{};
+function warpKey(s, el, stageW, stageH, adj, crop){
+  const a=adj||{}, cr=cropRect(crop);
   return stageW+'x'+stageH+'|'+s.rows+'x'+s.cols+'|'+
          (el.width||el.naturalWidth||0)+'|'+(a.flipH?'H':'')+(a.flipV?'V':'')+'|'+
-         JSON.stringify(s.pts);
+         cr.x+','+cr.y+','+cr.w+','+cr.h+'|'+JSON.stringify(s.pts);
 }
 
 // Calibration target for an empty / still-loading surface: checkerboard +

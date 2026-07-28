@@ -644,6 +644,230 @@ test('front/back reorder the paint stack and scale resizes about the centre', as
   await ctx.close();
 });
 
+// ── Test 12c: Undo / redo + arrow nudge ───────────────────────────────────────
+test('arrow nudge moves the surface and undo/redo walks the history', async ({ browser }) => {
+  const { page, ctx } = await openApp(browser);
+  await page.keyboard.press('a');
+  await page.waitForTimeout(60);
+
+  const cornerX = () => page.evaluate(() => window.surfaces[0].pts[0][0].x);
+  const x0 = await cornerX();
+
+  // arrow nudge: right 1px, then Shift+right 10px
+  await page.keyboard.press('ArrowRight');
+  await page.waitForTimeout(20);
+  await page.keyboard.press('Shift+ArrowRight');
+  await page.waitForTimeout(20);
+  const x1 = await cornerX();
+  expect(x1).toBeCloseTo(x0 + 11, 1);
+
+  // a second surface, then delete it — undo brings it (and its geometry) back
+  await page.keyboard.press('a');
+  await page.waitForTimeout(60);
+  expect(await page.evaluate(() => window.surfaces.length)).toBe(2);
+  await page.keyboard.press('Delete');
+  await page.waitForTimeout(40);
+  expect(await page.evaluate(() => window.surfaces.length)).toBe(1);
+
+  // Ctrl+Z restores the deleted surface
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(40);
+  expect(await page.evaluate(() => window.surfaces.length)).toBe(2);
+
+  // Ctrl+Z again undoes the nudges (a burst coalesced into ≤2 steps)
+  const depthBefore = await page.evaluate(() => window.undoDepth);
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(40);
+  // Ctrl+Shift+Z redoes
+  await page.keyboard.press('Control+Shift+z');
+  await page.waitForTimeout(40);
+  expect(await page.evaluate(() => window.surfaces.length)).toBe(2);
+
+  // undo of a mesh change restores the previous density
+  await page.evaluate(() => { window.selId; });
+  await page.click('[data-r="4"][data-c="4"]');
+  await page.waitForTimeout(40);
+  const selDense = await page.evaluate(() => window.surfaces.find(s => s.id === window.selId).rows);
+  expect(selDense).toBe(4);
+  await page.keyboard.press('Control+z');
+  await page.waitForTimeout(40);
+  const selBack = await page.evaluate(() => window.surfaces.find(s => s.id === window.selId).rows);
+  expect(selBack).toBe(2);
+
+  await ctx.close();
+});
+
+// ── Test 12d: Per-item crop ───────────────────────────────────────────────────
+test('crop writes normalised per-item rect, clamps, and syncs to the display', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const editor = await ctx.newPage();
+  await editor.goto(baseURL, { waitUntil: 'domcontentloaded' });
+  const closeBtn = editor.locator('#helpClose');
+  if (await closeBtn.isVisible()) await closeBtn.click();
+  const display = await ctx.newPage();
+  await display.goto(baseURL.replace('THROW.html', 'display.html'), { waitUntil: 'domcontentloaded' });
+  await display.waitForTimeout(200);
+
+  await editor.bringToFront();
+  await editor.keyboard.press('a');
+  await editor.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 64; c.height = 64;
+    c.getContext('2d').fillStyle = '#fff'; c.getContext('2d').fillRect(0, 0, 64, 64);
+    const b = await new Promise(r => c.toBlob(r, 'image/png'));
+    addToPlaylist(window.surfaces[0], [new File([b], 'one.png', { type: 'image/png' })]);
+  });
+  await editor.waitForTimeout(200);
+
+  // new items default to the full frame
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+
+  // set X=25 W=50 (%) → stored normalised
+  await editor.evaluate(() => {
+    const setv = (id, v) => { const e = document.getElementById(id); e.value = v; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); };
+    setv('cropX', 25); setv('cropW', 50);
+  });
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop)).toEqual({ x: 0.25, y: 0, w: 0.5, h: 1 });
+
+  // over-wide W clamps so x+w never exceeds the source
+  await editor.evaluate(() => { const e = document.getElementById('cropW'); e.value = 90; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); });
+  const c = await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop);
+  expect(c.x + c.w).toBeCloseTo(1, 5);   // 0.25 + 0.75
+
+  // crop reaches the display under pl.items[].crop
+  const surfId = await editor.evaluate(() => window.surfaces[0].id);
+  await display.waitForFunction((id) => {
+    const s = window.surfaceList.find(x => x.id === id);
+    return s && s.pl && s.pl.items[0].crop && Math.abs(s.pl.items[0].crop.x - 0.25) < 1e-6;
+  }, surfId, { timeout: 5000 });
+
+  // Full frame resets it
+  await editor.click('#btnCropReset');
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop)).toEqual({ x: 0, y: 0, w: 1, h: 1 });
+
+  // and it survives undo (crop change is one undo step)
+  await editor.evaluate(() => { const e = document.getElementById('cropX'); e.dispatchEvent(new Event('focus')); e.value = 40; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); });
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop.x)).toBeCloseTo(0.4, 5);
+  await editor.keyboard.press('Control+z');
+  await editor.waitForTimeout(40);
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].crop.x)).toBe(0);
+
+  await ctx.close();
+});
+
+// ── Test 12e: Trim in/out ─────────────────────────────────────────────────────
+test('trim inputs appear only for videos, write per-item seconds, and sync', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const editor = await ctx.newPage();
+  await editor.goto(baseURL, { waitUntil: 'domcontentloaded' });
+  const closeBtn = editor.locator('#helpClose');
+  if (await closeBtn.isVisible()) await closeBtn.click();
+  const display = await ctx.newPage();
+  await display.goto(baseURL.replace('THROW.html', 'display.html'), { waitUntil: 'domcontentloaded' });
+  await display.waitForTimeout(200);
+
+  await editor.bringToFront();
+  await editor.keyboard.press('a');
+
+  // an IMAGE item → the trim row stays hidden (trim is meaningless for stills)
+  await editor.evaluate(async () => {
+    const c = document.createElement('canvas'); c.width = 32; c.height = 32;
+    c.getContext('2d').fillRect(0, 0, 32, 32);
+    const b = await new Promise(r => c.toBlob(r, 'image/png'));
+    addToPlaylist(window.surfaces[0], [new File([b], 'still.png', { type: 'image/png' })]);
+  });
+  await editor.waitForTimeout(200);
+  await expect(editor.locator('#trimRow')).toBeHidden();
+
+  // a fake VIDEO item (kind flagged directly) → row shows and writes seconds
+  await editor.evaluate(() => {
+    const s = window.surfaces[0];
+    s.playlist.items[0].kind = 'video';   // pretend it's a clip for the UI path
+    s.media.item.kind = 'video';
+    updateUI();
+  });
+  await expect(editor.locator('#trimRow')).toBeVisible();
+
+  await editor.evaluate(() => {
+    const setv = (id, v) => { const e = document.getElementById(id); e.dispatchEvent(new Event('focus')); e.value = v; e.dispatchEvent(new Event('input')); e.dispatchEvent(new Event('change')); };
+    setv('trimIn', 2.5); setv('trimOut', 6);
+  });
+  expect(await editor.evaluate(() => [window.surfaces[0].playlist.items[0].trimIn, window.surfaces[0].playlist.items[0].trimOut])).toEqual([2.5, 6]);
+
+  // reaches the display
+  const surfId = await editor.evaluate(() => window.surfaces[0].id);
+  await display.waitForFunction((id) => {
+    const s = window.surfaceList.find(x => x.id === id);
+    return s && s.pl && s.pl.items[0].trimIn === 2.5 && s.pl.items[0].trimOut === 6;
+  }, surfId, { timeout: 5000 });
+
+  // the Downscale (transcode) control is part of the video-only panel
+  await expect(editor.locator('#btnDownscale')).toBeVisible();
+
+  // In and Out were two separate gestures → two undo steps.
+  // First undo reverts the Out edit (last), leaving In.
+  await editor.keyboard.press('Control+z');
+  await editor.waitForTimeout(40);
+  expect(await editor.evaluate(() => [window.surfaces[0].playlist.items[0].trimIn, window.surfaces[0].playlist.items[0].trimOut])).toEqual([2.5, 0]);
+  // Second undo reverts the In edit
+  await editor.keyboard.press('Control+z');
+  await editor.waitForTimeout(40);
+  expect(await editor.evaluate(() => window.surfaces[0].playlist.items[0].trimIn)).toBe(0);
+
+  await ctx.close();
+});
+
+// ── Test 12f: Trace → sticker mask ────────────────────────────────────────────
+test('sticker trace stores a mesh-UV mask, syncs it, and undo removes it', async ({ browser }) => {
+  const ctx = await browser.newContext({ viewport: { width: 1400, height: 900 } });
+  const editor = await ctx.newPage();
+  await editor.goto(baseURL, { waitUntil: 'domcontentloaded' });
+  const closeBtn = editor.locator('#helpClose');
+  if (await closeBtn.isVisible()) await closeBtn.click();
+  const display = await ctx.newPage();
+  await display.goto(baseURL.replace('THROW.html', 'display.html'), { waitUntil: 'domcontentloaded' });
+  await display.waitForTimeout(200);
+
+  await editor.bringToFront();
+  await editor.keyboard.press('p');                 // enter trace mode
+  await editor.click('#tmMask');                    // choose Sticker mask
+  await expect(editor.locator('#tmMask')).toHaveClass(/active/);
+
+  // click a diamond of 4 points on the place canvas, then Enter to close
+  // Trace a small diamond in the clear strip between the centred instruction
+  // box and the right inspector rail (avoids both).
+  const box = await editor.locator('#placeCanvas').boundingBox();
+  const cx = box.x + box.width * 0.62, cy = box.y + box.height * 0.48;
+  const r = box.width * 0.055;
+  await editor.mouse.click(cx, cy - r);
+  await editor.mouse.click(cx + r, cy);
+  await editor.mouse.click(cx, cy + r);
+  await editor.mouse.click(cx - r, cy);
+  await editor.waitForTimeout(30);
+  expect(await editor.evaluate(() => window.placePtsLen)).toBe(4);
+  await editor.keyboard.press('Enter');
+  await editor.waitForTimeout(80);
+
+  // a surface with a 4-point mask in normalised UV was created
+  const mask = await editor.evaluate(() => window.surfaces[0] && window.surfaces[0].mask);
+  expect(Array.isArray(mask)).toBe(true);
+  expect(mask.length).toBe(4);
+  for (const m of mask) { expect(m.u).toBeGreaterThanOrEqual(0); expect(m.u).toBeLessThanOrEqual(1); expect(m.v).toBeGreaterThanOrEqual(0); expect(m.v).toBeLessThanOrEqual(1); }
+
+  // the mask reaches the display
+  const surfId = await editor.evaluate(() => window.surfaces[0].id);
+  await display.waitForFunction((id) => {
+    const s = window.surfaceList.find(x => x.id === id);
+    return s && Array.isArray(s.mask) && s.mask.length === 4;
+  }, surfId, { timeout: 5000 });
+
+  // undo removes the traced surface
+  await editor.keyboard.press('Control+z');
+  await editor.waitForTimeout(40);
+  expect(await editor.evaluate(() => window.surfaces.length)).toBe(0);
+
+  await ctx.close();
+});
+
 // ── Test 13: 1×1 corner-pin mesh ──────────────────────────────────────────────
 // A 1×1 mesh is exactly 4 points, all corners. Corner drag must warp that
 // corner only; body drag must translate all 4 rigidly.

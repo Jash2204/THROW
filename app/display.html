@@ -90,8 +90,8 @@ function clearBanner(){ document.getElementById('banner').style.display = 'none'
 function ensureM(surfId){
   let M = mediaMap.get(surfId);
   if(!M){
-    M = {store:new Map(), order:[], adjust:new Map(), cfg:{transition:'cut', xfDur:1, imgDur:8},
-         cur:null, nxt:null, xfStart:0, curStart:0};
+    M = {store:new Map(), order:[], adjust:new Map(), crop:new Map(), trim:new Map(), cfg:{transition:'cut', xfDur:1, imgDur:8},
+         cur:null, nxt:null, xfStart:0, curStart:0, _cued:false};
     mediaMap.set(surfId, M);
   }
   return M;
@@ -186,6 +186,8 @@ function syncPl(surfId, pl){
   const list = Array.isArray(pl.items) ? pl.items : [];
   M.order = list.map(it=>it.id);
   M.adjust = new Map(list.map(it=>[it.id, it.adjust||{}]));   // each item's own look
+  M.crop = new Map(list.map(it=>[it.id, it.crop||null]));     // and its own crop
+  M.trim = new Map(list.map(it=>[it.id, {in:+it.trimIn||0, out:+it.trimOut||0}]));  // in/out seconds (out 0 = end)
   // prune items removed from the playlist
   for(const id of [...M.store.keys()]) if(!M.order.includes(id)){ disposeItem(M.store.get(id)); M.store.delete(id); }
   if(M.nxt && !M.order.includes(M.nxt)){ M.nxt=null; }
@@ -194,12 +196,23 @@ function syncPl(surfId, pl){
 }
 // Make reality match intent: cur points at a valid item, only active videos
 // play, single-item videos loop natively (no 'ended' churn).
+// A trim window makes an item start at trimIn and end at trimOut (0 = end).
+function trimOf(M, id){ const t=M.trim.get(id)||{}; return {in:Math.max(0,t.in||0), out:Math.max(0,t.out||0)}; }
+function hasTrim(M, id){ const t=trimOf(M,id); return t.in>0 || t.out>0; }
+function seekTrimIn(M, id){
+  const it=M.store.get(id); if(!it || it.kind!=='video') return;
+  const t=trimOf(M,id);
+  try{ if(t.in>0 && Math.abs(it.el.currentTime-t.in)>0.05) it.el.currentTime=t.in; }catch(_){}
+}
+
 function syncPlayback(M){
-  if(!M.cur && M.order.length) M.cur=M.order[0];
+  if(!M.cur && M.order.length){ M.cur=M.order[0]; M._cued=false; }
   const now=performance.now();
   for(const [id,item] of M.store){
     if(item.kind!=='video') continue;
-    item.el.loop = (M.order.length===1);
+    // native loop only when a lone clip has no trim window; trimmed clips loop
+    // manually within [trimIn, trimOut] via tickPlaylists
+    item.el.loop = (M.order.length===1) && !hasTrim(M, id);
     const active = (id===M.cur || id===M.nxt);
     if(active){
       if(item.el.paused) item.el.play().catch(()=>{});
@@ -216,17 +229,18 @@ function advanceSurf(M){
   const nid=M.order[(i+1)%M.order.length];
   if(M.cfg.transition==='cut'){
     const old=M.store.get(M.cur);
-    M.cur=nid; M.curStart=performance.now();
+    M.cur=nid; M.curStart=performance.now(); M._cued=false;
     if(old && old.kind==='video'){ try{ old.el.pause(); old.el.currentTime=0; }catch(_){} }
     syncPlayback(M);
   } else {
     M.nxt=nid; M.xfStart=performance.now();
     syncPlayback(M);   // starts the incoming video during the fade
+    seekTrimIn(M, nid);   // incoming clip fades in from ITS trimIn
   }
 }
 function finishTransition(M){
   const old=M.store.get(M.cur);
-  M.cur=M.nxt; M.nxt=null; M.curStart=performance.now();
+  M.cur=M.nxt; M.nxt=null; M.curStart=performance.now(); M._cued=false;
   if(old && old.kind==='video'){ try{ old.el.pause(); old.el.currentTime=0; }catch(_){} }
 }
 
@@ -241,12 +255,28 @@ function surfacePasses(M, now){
   }
   return M.cur ? [{id:M.cur,mul:1}] : [];
 }
-// Image/animation items advance on a timer (videos advance on 'ended').
+// Per-frame scheduler: cue videos to their trimIn, loop/advance at trimOut,
+// and advance image items on their timer. (The coarse 1.5s watchdog can't do
+// trim — it would overshoot the out-point by up to a frame-and-a-half.)
 function tickPlaylists(now){
   for(const M of mediaMap.values()){
-    if(M.order.length<2 || M.nxt || !M.cur) continue;
+    if(!M.cur || M.nxt) continue;   // mid-crossfade: leave both clips rolling
     const it=M.store.get(M.cur);
-    if(it && it.kind!=='video' && now-M.curStart > M.cfg.imgDur*1000) advanceSurf(M);
+    if(!it) continue;
+    if(it.kind==='video'){
+      const el=it.el;
+      const t=trimOf(M, M.cur);
+      if(!M._cued && el.readyState>=1){ seekTrimIn(M, M.cur); M._cued=true; }
+      if(el.readyState>=2 && el.duration){
+        const tout=(t.out>t.in) ? Math.min(t.out, el.duration) : el.duration;
+        if(el.currentTime >= tout-0.02){
+          if(M.order.length>=2) advanceSurf(M);                                  // next clip
+          else { try{ el.currentTime=t.in; el.play().catch(()=>{}); }catch(_){} } // loop the window
+        }
+      }
+    } else if(M.order.length>=2 && now-M.curStart > M.cfg.imgDur*1000){
+      advanceSurf(M);
+    }
   }
 }
 
@@ -357,19 +387,22 @@ let gl=null, glLoc=null;
 const glMesh = new Map();   // surfId -> {vbo, count, key}   (textures live on playlist items)
 const GL_OK_BLENDS = new Set(['normal','screen','multiply','add']);
 
+let glMask=null;
 function initGL(){
   try{
-    gl = oc.getContext('webgl', {alpha:false, antialias:false});
+    gl = oc.getContext('webgl', {alpha:false, antialias:false, stencil:true});
     if(!gl) return false;
     const vs =
       'attribute vec2 a_pos; attribute vec2 a_uv; varying vec2 v_uv;'+
       'uniform vec3 u_fit; uniform vec2 u_view;'+                 // fit: scale,ox,oy (stage→device px)
       'uniform vec2 u_flip;'+                                     // 0 or 1 per axis
+      'uniform vec4 u_crop;'+                                     // x,y,w,h source sub-rect
       'void main(){'+
       '  vec2 px = a_pos*u_fit.x + u_fit.yz;'+
       '  gl_Position = vec4(px.x/u_view.x*2.0-1.0, 1.0-px.y/u_view.y*2.0, 0.0, 1.0);'+
-      // abs(0-uv)=uv, abs(1-uv)=1-uv — flips per item without rebuilding the mesh
-      '  v_uv = abs(u_flip - a_uv);'+
+      // flip within [0,1] (abs(0-uv)=uv, abs(1-uv)=1-uv), then map into the crop
+      // rect — both per-item uniforms, so one mesh still serves every item
+      '  v_uv = u_crop.xy + abs(u_flip - a_uv) * u_crop.zw;'+
       '}';
     const fs =
       'precision mediump float; varying vec2 v_uv;'+
@@ -407,7 +440,24 @@ function initGL(){
       fit:gl.getUniformLocation(prog,'u_fit'), view:gl.getUniformLocation(prog,'u_view'),
       op:gl.getUniformLocation(prog,'u_opacity'), mode:gl.getUniformLocation(prog,'u_mode'),
       adjust:gl.getUniformLocation(prog,'u_adjust'), flip:gl.getUniformLocation(prog,'u_flip'),
+      crop:gl.getUniformLocation(prog,'u_crop'),
     };
+    // ── mask program: position-only, used to stamp sticker shapes into the
+    //    stencil buffer (colour writes are masked off while it runs) ──
+    const mvs='attribute vec2 a_pos; uniform vec3 u_fit; uniform vec2 u_view;'+
+      'void main(){ vec2 px=a_pos*u_fit.x+u_fit.yz;'+
+      '  gl_Position=vec4(px.x/u_view.x*2.0-1.0, 1.0-px.y/u_view.y*2.0, 0.0, 1.0); }';
+    const mfs='precision mediump float; void main(){ gl_FragColor=vec4(1.0); }';
+    const mprog=gl.createProgram();
+    gl.attachShader(mprog, sh(gl.VERTEX_SHADER, mvs));
+    gl.attachShader(mprog, sh(gl.FRAGMENT_SHADER, mfs));
+    gl.linkProgram(mprog);
+    if(!gl.getProgramParameter(mprog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(mprog));
+    glMask={ prog:mprog, vbo:gl.createBuffer(),
+      pos:gl.getAttribLocation(mprog,'a_pos'),
+      fit:gl.getUniformLocation(mprog,'u_fit'), view:gl.getUniformLocation(mprog,'u_view') };
+    glMask.mainProg=prog;
+
     gl.enable(gl.BLEND);
     gl.disable(gl.DEPTH_TEST);
     gl.pixelStorei(gl.UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
@@ -415,6 +465,35 @@ function initGL(){
   }catch(_){ gl=null; return false; }
 }
 const hasGL = initGL();
+
+// Stencil-stamp a surface's sticker mask, then set the test so subsequent draws
+// only land inside it. Returns true if a mask was applied (caller must reset).
+function applyMaskStencil(s, sc, ox, oy){
+  const mp = s.mask && maskStagePts(s);
+  if(!mp) return false;
+  const tris = earClip(mp);
+  if(tris.length<6) return false;
+  gl.enable(gl.STENCIL_TEST);
+  gl.clearStencil(0);
+  gl.clear(gl.STENCIL_BUFFER_BIT);
+  gl.colorMask(false,false,false,false);
+  gl.stencilFunc(gl.ALWAYS, 1, 0xFF);
+  gl.stencilOp(gl.KEEP, gl.KEEP, gl.REPLACE);
+  gl.useProgram(glMask.prog);
+  gl.uniform3f(glMask.fit, sc, ox, oy);
+  gl.uniform2f(glMask.view, oc.width, oc.height);
+  gl.bindBuffer(gl.ARRAY_BUFFER, glMask.vbo);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(tris), gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(glMask.pos);
+  gl.vertexAttribPointer(glMask.pos, 2, gl.FLOAT, false, 0, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, tris.length/2);
+  // back to the media program, drawing only where stencil==1
+  gl.colorMask(true,true,true,true);
+  gl.stencilFunc(gl.EQUAL, 1, 0xFF);
+  gl.stencilOp(gl.KEEP, gl.KEEP, gl.KEEP);
+  gl.useProgram(glMask.mainProg);
+  return true;
+}
 
 // Tessellate the bilinear mesh for the GPU. Subdivision is fixed and generous
 // (verts are nearly free in GL) so dense warps stay smooth.
@@ -450,8 +529,10 @@ function drawGL(){
   const ox=(W-stageW*sc)/2, oy=(H-stageH*sc)/2;
   gl.enable(gl.SCISSOR_TEST);   // clip to the stage rect, like the 2D path
   gl.scissor(Math.round(ox), Math.round(H-oy-stageH*sc), Math.round(stageW*sc), Math.round(stageH*sc));
+  gl.useProgram(glMask.mainProg);
   gl.uniform3f(glLoc.fit, sc, ox, oy);
   gl.uniform2f(glLoc.view, W, H);
+  gl.disable(gl.STENCIL_TEST);
 
   const now=performance.now();
   for(const s of surfaceList){
@@ -459,16 +540,23 @@ function drawGL(){
     const M = mediaMap.get(s.id);
     if(!M) continue;
 
-    // mesh is per-surface and shared by all passes
+    // build the mesh once (shared by all passes)
     const key=s.rows+'x'+s.cols+'|'+JSON.stringify(s.pts);
     let msh=glMesh.get(s.id);
     if(!msh){ msh={vbo:gl.createBuffer(), count:0, key:null}; glMesh.set(s.id,msh); }
-    gl.bindBuffer(gl.ARRAY_BUFFER, msh.vbo);
     if(msh.key!==key){
+      gl.bindBuffer(gl.ARRAY_BUFFER, msh.vbo);
       const v=buildMesh(s);
       gl.bufferData(gl.ARRAY_BUFFER, v, gl.DYNAMIC_DRAW);
       msh.count=v.length/4; msh.key=key;
     }
+
+    // sticker mask → stencil (switches programs internally, so bind the mesh
+    // attribs AFTER); unmasked surfaces run with the stencil test off
+    const masked = applyMaskStencil(s, sc, ox, oy);
+    if(!masked) gl.disable(gl.STENCIL_TEST);
+
+    gl.bindBuffer(gl.ARRAY_BUFFER, msh.vbo);
     gl.enableVertexAttribArray(glLoc.pos);
     gl.enableVertexAttribArray(glLoc.uv);
     gl.vertexAttribPointer(glLoc.pos, 2, gl.FLOAT, false, 16, 0);
@@ -505,6 +593,8 @@ function drawGL(){
         (typeof adj.sat==='number')?adj.sat:1,
         (adj.hue||0)*Math.PI/180);
       gl.uniform2f(glLoc.flip, adj.flipH?1:0, adj.flipV?1:0);
+      const cr=cropRect(M.crop.get(pass.id));   // this ITEM's crop
+      gl.uniform4f(glLoc.crop, cr.x, cr.y, cr.w, cr.h);
       if(blend==='add'){           gl.uniform1i(glLoc.mode,1); gl.blendFunc(gl.ONE, gl.ONE); }
       else if(blend==='screen'){   gl.uniform1i(glLoc.mode,2); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_COLOR); }
       else if(blend==='multiply'){ gl.uniform1i(glLoc.mode,3); gl.blendFunc(gl.DST_COLOR, gl.ZERO); }
@@ -540,7 +630,7 @@ function draw2D(){
           const el=itemEl(item, false);   // staged: per-triangle video sampling stalls the decoder
           if(!el) continue;
           const op=((typeof s.opacity==='number')?s.opacity:1)*pass.mul;
-          renderSurfaceTo(g2, {...s, opacity:op}, el, stageW, stageH, M.adjust.get(pass.id)||{});
+          renderSurfaceTo(g2, {...s, opacity:op}, el, stageW, stageH, M.adjust.get(pass.id)||{}, M.crop.get(pass.id));
         }
       }catch(err){ banner('A surface failed to render and was skipped', err.message); }
     }

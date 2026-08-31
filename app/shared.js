@@ -328,13 +328,28 @@ function renderSurfaceTo(dst, s, el, stageW, stageH, adj, crop){
   compositeSurface(dst, _off, s, adj);
 }
 
+// Stable per-element identity, stamped lazily. Dimensions alone can NOT
+// identify media here: makeThumb scales every source into a ≤512px box, so
+// any two 16:9 clips both become 512×288 — keying on width let a replaced
+// image be re-composited from the previous one's cached buffer. Object
+// identity is the real invariant (new media ⇒ new element ⇒ new id; the same
+// item re-selected reuses its cached thumbnail canvas and still hits).
+let _elSeq = 0;
+function elemId(el){
+  if(!el._throwElId) el._throwElId = ++_elSeq;
+  return el._throwElId;
+}
+
 // Cache key for a warped buffer: changes when anything that affects the WARP
 // changes (geometry, mesh density, stage size, media identity). Blend and
 // opacity are deliberately NOT included — they apply at composite time.
 function warpKey(s, el, stageW, stageH, adj, crop){
   const a=adj||{}, cr=cropRect(crop);
+  // dimensions stay in the key alongside the id: an <img>'s naturalWidth goes
+  // 0 → real on load without the element changing.
   return stageW+'x'+stageH+'|'+s.rows+'x'+s.cols+'|'+
-         (el.width||el.naturalWidth||0)+'|'+(a.flipH?'H':'')+(a.flipV?'V':'')+'|'+
+         elemId(el)+':'+(el.width||el.naturalWidth||0)+'x'+(el.height||el.naturalHeight||0)+'|'+
+         (a.flipH?'H':'')+(a.flipV?'V':'')+'|'+
          cr.x+','+cr.y+','+cr.w+','+cr.h+'|'+JSON.stringify(s.pts);
 }
 
@@ -441,13 +456,32 @@ function createAnimatedCanvas(file){
         const dur = res.image.duration != null ? res.image.duration/1000 : 100;
         frames.push({image: res.image, duration: Math.max(20, dur)});
       }
+      // The decoder holds the demuxer and its own buffers; the VideoFrames we
+      // just pulled out are ours and stay valid after it closes (verified by
+      // pixel-checking a decoded frame before and after close()). Closing it
+      // here releases everything except the frames we still need.
+      try{ decoder.close(); }catch(_){ }
+      decoder = null;   // so the catch below cannot double-close
+
       const fc = document.createElement('canvas');
       fc.width = frames[0].image.displayWidth;
       fc.height = frames[0].image.displayHeight;
       const fctx = fc.getContext('2d');
       fctx.drawImage(frames[0].image, 0, 0);
       let idx=0, last=0, dead=false;
-      fc._stop = ()=>{ dead=true; };
+      // Decoded VideoFrames hold real (often GPU) memory and are NOT
+      // garbage-collected like ordinary objects — they must be closed. A long
+      // GIF is hundreds of frames, and releasing the surface previously freed
+      // none of them. Safe to close here because advance() bails on `dead`
+      // before it can draw from a closed frame.
+      fc._stop = ()=>{
+        if(dead) return;
+        dead=true;
+        fc._dead = true;   // a stopped canvas is spent: its frames are closed and
+                           // advance() will never draw again. Callers that CACHE
+                           // these must re-decode rather than reuse a dead one.
+        for(const f of frames){ try{ f.image.close(); }catch(_){} }
+      };
       function advance(now){
         if(dead) return;
         const f=frames[idx];

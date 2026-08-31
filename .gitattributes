@@ -1,0 +1,7 @@
+# In .gitattributes the LAST matching rule wins, so the general rule goes first
+# and the exception after it.
+* text=auto
+
+# start.bat must keep CRLF: cmd.exe is unreliable with LF-only batch files,
+# particularly around goto labels (see NOTES §11).
+*.bat text eol=crlf

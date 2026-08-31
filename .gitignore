@@ -1,4 +1,13 @@
+# Dependencies and test output
 node_modules/
 test-results/
 playwright-report/
-package-lock.json
+
+# OS and editor noise — Windows in particular drops desktop.ini into folders
+# it has ever shown in Explorer, which is easy to commit by accident.
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp

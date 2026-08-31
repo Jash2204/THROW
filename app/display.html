@@ -18,6 +18,10 @@
   }
   #badge{color:#ffb020;font:12px ui-monospace,monospace;letter-spacing:.14em}
   #tip{color:rgba(255,255,255,.5);font:11px ui-monospace,monospace}
+  #status{font:11px ui-monospace,monospace;color:#c4ff2e;max-width:46ch}
+  #status.warn{color:#ffb020}
+  #meter{font:11px ui-monospace,monospace;color:rgba(255,255,255,.45);white-space:nowrap}
+  #meter.warn{color:#ffb020}
   #fsbtn{
     padding:10px 24px;border-radius:6px;border:1px solid #8ab320;background:rgba(196,255,46,.12);
     color:#c4ff2e;font:13px ui-monospace,monospace;letter-spacing:.1em;cursor:pointer;
@@ -45,10 +49,13 @@
 <div id="hud">
   <span id="badge">⧉ DISPLAY</span>
   <span id="tip">drag this tab's window onto the projector, then fullscreen — edits sync live from the editor</span>
+  <span id="status"></span>
+  <span id="meter"></span>
   <button id="fsbtn">⛶ FULLSCREEN</button>
 </div>
 
 <script src="shared.js"></script>
+<script src="display-storage.js"></script>
 <script>
 // ══════════════════════════════════════════════════════════════════
 //  THROW display tab — a pure renderer.
@@ -66,8 +73,38 @@ const g2   = oc2d.getContext('2d');
 const og   = ov.getContext('2d');
 let stageW = 1920, stageH = 1080;
 let surfaceList = [];            // ordered geometry from the editor
-let showOutlines = true;
+let showOutlines = false;   // see 00-state.js — off until asked for
 const mediaMap = new Map();      // surfId -> {store:Map(itemId->item), order, cfg, cur, nxt, ...}
+const incoming = new Map();      // itemId -> {surfId, xfer, name, mime, size, got, backend}
+                                 // (transfer in flight; bytes live in DiskStore)
+// Session ids of OTHER display tabs that answered the roll-call. Declared here,
+// ahead of the message handler that fills it — the same declaration-after-use
+// trap that broke the editor split (NOTES §13).
+const _aliveSessions = new Set();
+
+// TWO ceilings, and they are not interchangeable. Items under DiskStore.SMALL
+// stay in memory whatever the disk situation, so they are bounded by MEM_BUDGET
+// no matter how much quota exists. Folding both into one number meant forty
+// 50MB clips were checked against an 8GB disk budget and never warned at all —
+// the exact failure this reporting exists to surface.
+let MEM_BUDGET = 2.5 * 1024 * 1024 * 1024;     // measured in-memory blob ceiling
+                                               // (settable below purely so a test
+                                               // can trip it without allocating 2.5GB)
+const QUOTA_RESERVE = 0.20;                    // leave a fifth of the quota unused
+let _diskBudget = 0;                 // 0 = disk unavailable
+let _quota = 0, _quotaUsage = 0, _diskOK = false;
+let _heldBytes = 0;                  // MEMORY-backed bytes only
+const GB = (n) => (n / 1073741824).toFixed(1) + ' GB';
+const MB = (n) => Math.round(n / 1048576) + ' MB';
+const SZ = (n) => n >= 1073741824 ? GB(n) : MB(n);
+
+async function refreshBudget(){
+  _diskOK = await DiskStore.probe();
+  const e = await DiskStore.estimate();
+  _quota = (e && e.quota) || 0;
+  _quotaUsage = (e && e.usage) || 0;
+  _diskBudget = (_diskOK && _quota) ? _quota * (1 - QUOTA_RESERVE) : 0;
+}
 
 // videos live in a tiny visible holder — invisible media gets suspended
 const holder = document.createElement('div');
@@ -82,11 +119,30 @@ function banner(msg, detail){
 }
 function clearBanner(){ document.getElementById('banner').style.display = 'none'; }
 
+// The editor has had these since the start; this page did not, so an async
+// failure anywhere in the media path disappeared silently and the projection
+// just stopped with no explanation. Nothing fails silently (NOTES §4).
+window.addEventListener('error', e=>{
+  banner('Something went wrong in the display: '+(e.message||'unknown error'),
+         e.filename ? ('line '+e.lineno) : '');
+});
+window.addEventListener('unhandledrejection', e=>{
+  const r=e.reason;
+  banner('A background task failed in the display: '+((r&&r.message)||String(r)));
+});
+
 // ── Media handling (playlists; local to this tab) ─────────────────
 // Per surface: a STORE of items (content-addressed by itemId — blobs arrive
 // once) plus an ORDER + transition config that ride the state broadcast.
 // The scheduler plays order[cur], advances on video 'ended' or an image
 // timer, and hands over via cut / crossfade / fade-to-black.
+// Mark an item present: it is no longer a gap to be pulled. Called wherever an
+// item actually lands in the store.
+function itemArrived(M, itemId){
+  if(M._missing) M._missing.delete(itemId);
+  if(M._asked) M._asked.delete(itemId);
+}
+
 function ensureM(surfId){
   let M = mediaMap.get(surfId);
   if(!M){
@@ -97,6 +153,13 @@ function ensureM(surfId){
   return M;
 }
 function disposeItem(item){
+  _heldBytes -= (item && item.bytes) || 0;
+  if(_heldBytes < 0) _heldBytes = 0;
+  // A disk-backed clip owns a real FILE; dropping the element is not enough.
+  // Release by filename, never by itemId: during a re-transfer the id already
+  // points at the INCOMING file, so releasing by id here deleted the new
+  // backing store at the instant the new item was stored.
+  if(item && item.disk && item.fileName) DiskStore.releaseFile(item.fileName);
   try{ if(item.el && item.el.pause) item.el.pause(); }catch(_){}
   try{ if(item.el && item.el.parentNode) item.el.remove(); }catch(_){}
   try{ if(item.el && item.el._stop) item.el._stop(); }catch(_){}
@@ -105,15 +168,27 @@ function disposeItem(item){
   item.tex=null;
 }
 function clearMedia(surfId){
+  // The GL buffer is freed FIRST and unconditionally: a surface that never had
+  // media has no mediaMap entry but may well have a mesh (drawGL builds one per
+  // surface), and returning early on `!M` leaked it for the whole session.
+  try{ const msh=glMesh.get(surfId); if(msh && gl) gl.deleteBuffer(msh.vbo); glMesh.delete(surfId); }catch(_){}
   const M = mediaMap.get(surfId);
   if(!M) return;
   for(const item of M.store.values()) disposeItem(item);
   mediaMap.delete(surfId);
-  try{ const msh=glMesh.get(surfId); if(msh && gl) gl.deleteBuffer(msh.vbo); glMesh.delete(surfId); }catch(_){}
 }
 
-async function addItemBlob(surfId, itemId, name, blob){
+async function addItemBlob(surfId, itemId, name, blob, backend, fileName){
+  const blob0 = blob;   // kept so the error handler can reason about its size
+  const bytes0 = (blob0 && blob0.size) || 0;
+  const disk = backend === 'opfs';
   const M = ensureM(surfId);
+  // Only MEMORY-backed bytes count against the blob ceiling. A disk-backed
+  // clip costs storage quota instead, which is the whole point of putting it
+  // there — counting it here would re-impose the limit OPFS just removed.
+  // NOTE the increment must not happen before the early returns below, or an
+  // item that never reaches the store leaks its bytes into the total forever.
+  const charge = () => { if(!disk) _heldBytes += bytes0; };
   const old = M.store.get(itemId);
   if(old) disposeItem(old);
   const file = new File([blob], name || 'media', {type: blob.type});
@@ -122,7 +197,16 @@ async function addItemBlob(surfId, itemId, name, blob){
   if(!video && ANIMATED_EXT.test(name||'')){
     try{
       const anim = await createAnimatedCanvas(file);
-      if(anim){ M.store.set(itemId, {kind:'anim', el:anim.canvas, url:null, name}); return; }
+      // M was captured before this await. If the surface was deleted while the
+      // decode ran, clearMedia already dropped it from mediaMap — storing into
+      // that stale M would strand a self-advancing canvas holding its decoded
+      // frames for the life of the tab. Same if a newer blob for this id
+      // arrived meanwhile and already populated the store.
+      if(anim && mediaMap.get(surfId)!==M){
+        try{ if(anim.canvas && anim.canvas._stop) anim.canvas._stop(); }catch(_){}
+        return;
+      }
+      if(anim){ charge(); M.store.set(itemId, {kind:'anim', el:anim.canvas, url:null, name, bytes:disk?0:bytes0, disk, itemId, fileName}); itemArrived(M, itemId); return; }
     }catch(err){ banner(err.message); }
     // fall through to plain <img> (browser still animates GIF/WebP natively)
   }
@@ -145,7 +229,16 @@ async function addItemBlob(surfId, itemId, name, blob){
         setTimeout(()=>{ try{ el.src=url; el.load(); if(isActive(surfId,itemId)) el.play().catch(()=>{}); }catch(_){} }, 70);
         return;
       }
-      banner('Couldn’t play '+(name||'that video')+' — '+mediaErrText(code)+'.', playbackHint(name, code));
+      // A big clip failing with "unsupported source" is almost never the
+      // codec: it is the blob store refusing to serve bytes it cannot hold.
+      // Saying "re-encode, it is probably HEVC" there sends the user chasing
+      // the wrong problem entirely.
+      if((code===3 || code===4) && !disk && _heldBytes > MEM_BUDGET*0.7){
+        banner('Couldn’t play “'+(name||'that clip')+'” — this tab is holding '+GB(_heldBytes)+' of video, past what the browser will serve',
+               'this is a size limit, not a codec problem — select your largest clips in the editor and use ⤓ Downscale to 1080p, then reload this tab');
+      } else {
+        banner('Couldn’t play '+(name||'that video')+' — '+mediaErrText(code)+'.', playbackHint(name, code));
+      }
     });
     el.addEventListener('loadeddata', ()=>{ clearBanner(); if(isActive(surfId,itemId)) el.play().catch(()=>{}); });
     el.addEventListener('ended', ()=>{
@@ -154,12 +247,16 @@ async function addItemBlob(surfId, itemId, name, blob){
     });
     holder.appendChild(el);
     el.src = url;
-    M.store.set(itemId, {kind:'video', el, url, name});
+    charge();
+    M.store.set(itemId, {kind:'video', el, url, name, bytes:disk?0:bytes0, disk, itemId, fileName});
+    itemArrived(M, itemId);
   } else {
     const el = new Image();
     el.addEventListener('error', ()=>banner('Couldn’t load '+(name||'that image')+'.','the file may be corrupt or an unsupported format'));
     el.src = url;
-    M.store.set(itemId, {kind:'image', el, url, name});
+    charge();
+    M.store.set(itemId, {kind:'image', el, url, name, bytes:disk?0:bytes0, disk, itemId, fileName});
+    itemArrived(M, itemId);
   }
   syncPlayback(M);
 }
@@ -170,7 +267,12 @@ function addItemSrc(surfId, itemId, src, name){   // data: URLs from a restored 
   if(old) disposeItem(old);
   const el = new Image();
   el.src = src;
-  M.store.set(itemId, {kind:'image', el, url:null, name:name||'restored image'});
+  // data: URLs are held in memory like any blob, so they count too — this
+  // was previously invisible to the running total.
+  const approx = Math.floor((src.length - (src.indexOf(',')+1)) * 0.75);
+  _heldBytes += approx;
+  M.store.set(itemId, {kind:'image', el, url:null, name:name||'restored image', bytes:approx, disk:false, itemId});
+  itemArrived(M, itemId);
   syncPlayback(M);
 }
 
@@ -192,6 +294,20 @@ function syncPl(surfId, pl){
   for(const id of [...M.store.keys()]) if(!M.order.includes(id)){ disposeItem(M.store.get(id)); M.store.delete(id); }
   if(M.nxt && !M.order.includes(M.nxt)){ M.nxt=null; }
   if(M.cur && !M.order.includes(M.cur)){ M.cur=null; }
+  // NOTE what the order references but this tab doesn't hold — but do NOT ask
+  // for it here. The editor starts an async arrayBuffer read and the (tiny)
+  // state message overtakes it, so a just-dropped clip is legitimately absent
+  // for as long as the read takes — ~100ms for 80MB. Asking on sight re-sent
+  // every clip twice. needSweep() below asks only once the grace period is up.
+  if(!M._missing) M._missing=new Map();
+  if(!M._asked) M._asked=new Set();
+  const nowT=performance.now();
+  for(const id of M.order) if(!M.store.has(id) && !incoming.has(id) && !M._missing.has(id)) M._missing.set(id, nowT);
+  for(const id of [...M._missing.keys()]){
+    // An item whose bytes are arriving right now is not missing — a multi-GB
+    // clip takes far longer than the grace period to ship.
+    if(M.store.has(id) || incoming.has(id) || !M.order.includes(id)){ M._missing.delete(id); M._asked.delete(id); }
+  }
   syncPlayback(M);
 }
 // Make reality match intent: cur points at a valid item, only active videos
@@ -304,11 +420,105 @@ function itemEl(item, raw){
   return (el.complete && el.naturalWidth>0) ? el : null;
 }
 
+// Pull anything the playlist still references after the grace period. This is
+// the recovery path for a blob the display pruned (an undo brought the item
+// back) or a message that was genuinely lost — NOT the normal load path, which
+// the editor pushes. The grace period must comfortably outlast a large file's
+// arrayBuffer read or every dropped clip crosses the channel twice.
+const NEED_GRACE_MS = 2500;
+function needSweep(){
+  const nowT=performance.now();
+  for(const [surfId,M] of mediaMap){
+    if(!M._missing || !M._missing.size) continue;
+    // The sweep owns this bookkeeping: syncPl only runs when the state snapshot
+    // actually changes, so it stops once the scene settles.
+    for(const id of [...M._missing.keys()]){
+      if(M.store.has(id) || incoming.has(id) || !M.order.includes(id)) itemArrived(M, id);
+    }
+    for(const [id,since] of M._missing){
+      if(nowT-since < NEED_GRACE_MS || M._asked.has(id)) continue;
+      M._asked.add(id);   // one request per gap; hello-display covers a hard resync
+      try{ bc.postMessage({type:'need-item', surfId, itemId:id}); }catch(_){}
+    }
+  }
+}
+
+// ── Status and self-help ──────────────────────────────────────────
+// This tab is a passive renderer, so every upstream problem looks the same
+// from here: a checkerboard, or a still frame. That is indistinguishable from
+// "nothing has been set up yet", which leaves the user staring at a wall with
+// no idea whose fault it is. Say which it is, and name the one remedy that
+// always works — reloading rebuilds every media element from scratch and the
+// editor repopulates it automatically via the hello handshake.
+let _health = '', _healthFor = 0;
+
+function updateHud(){
+  const st = document.getElementById('status');
+  if(!st) return;
+  if(incoming.size){
+    let got=0, total=0, name='';
+    for(const inc of incoming.values()){ got+=inc.got; total+=inc.size||0; name=inc.name||name; }
+    const pct = total ? Math.floor(got/total*100) : 0;
+    st.className = '';
+    st.textContent = 'receiving ' + (incoming.size>1 ? incoming.size+' clips' : '“'+name+'”') + ' — ' + pct + '%';
+    return;
+  }
+  st.className = _health ? 'warn' : '';
+  st.textContent = _health;
+  paintMeter();
+}
+
+// What this tab is holding, and against what. Deliberately separate from
+// #status: that line is for problems, this one is always-on context.
+function paintMeter(){
+  const m = document.getElementById('meter');
+  if(!m) return;
+  let clips = 0, videos = 0;
+  for(const M of mediaMap.values()){
+    clips += M.store.size;
+    for(const it of M.store.values()) if(it.kind==='video') videos++;
+  }
+  if(!clips && !incoming.size){ m.textContent = ''; m.className = ''; return; }
+  // Report the two ceilings separately. Adding memory bytes to whole-origin
+  // disk usage produced a number that meant nothing in either unit.
+  const parts = [clips + ' clip' + (clips===1?'':'s') + (videos>1 ? ' ('+videos+' video)' : '')];
+  if(_diskOK && _diskBudget) parts.push(SZ(_quotaUsage) + ' on disk of ' + GB(_diskBudget));
+  if(_heldBytes)             parts.push(SZ(_heldBytes) + ' in memory of ' + GB(MEM_BUDGET));
+  if(!_diskOK)               parts.push('memory only — no disk storage here');
+  const near = _heldBytes > MEM_BUDGET * 0.7 ||
+               (_diskBudget && _quotaUsage > _diskBudget * 0.85);
+  m.className = near ? 'warn' : '';
+  m.textContent = parts.join(' · ');
+}
+
+function healthCheck(){
+  let missing=0, stuck=0;
+  for(const M of mediaMap.values()){
+    if(!M.order.length) continue;
+    for(const iid of M.order) if(!M.store.has(iid) && !incoming.has(iid)) missing++;
+    const cur = M.cur && M.store.get(M.cur);
+    if(cur && cur.kind==='video' && cur.el && !cur.el.ended && cur.el.readyState>=2 && cur.el.paused) stuck++;
+  }
+  const prev=_health;
+  if(incoming.size)   _health='';                       // a transfer is in progress; not stuck
+  else if(missing)    _health='waiting for '+missing+' clip'+(missing>1?'s':'')+' from the editor — if this stays, reload this tab (Ctrl+R)';
+  else if(stuck)      _health=stuck+' clip'+(stuck>1?'s':'')+' not advancing — reload this tab (Ctrl+R) to rebuild playback';
+  else                _health='';
+  _healthFor = (_health && _health===prev) ? _healthFor+1 : 0;
+  // The HUD is hidden in fullscreen, so a problem that persists has to reach
+  // the banner instead — that is the only surface the user can see on the wall.
+  if(_health && _healthFor===8) banner(_health);
+  if(!_health && prev) clearBanner();
+  updateHud();
+}
+
 // Watchdog: re-kick paused ACTIVE videos, and detect DECODE STALLS — a video
 // "playing" with frozen currentTime (several high-res streams exceeding the
 // GPU decode budget). A tiny re-seek restarts the pipeline; if it keeps
 // stalling, say the honest reason.
 setInterval(()=>{
+  needSweep();
+  healthCheck();
   for(const M of mediaMap.values()){
     for(const [id,item] of M.store){
       if(item.kind!=='video') continue;
@@ -322,7 +532,7 @@ setInterval(()=>{
             try{ el.currentTime=Math.max(0, el.currentTime-0.001); }catch(_){}
             el.play().catch(()=>{});
           } else if(item._stall===6){
-            banner((item.name||'a clip')+' keeps stalling — this machine is likely at its hardware video-decode limit. Several high-res clips at once? Re-encode them to 1080p (the projector can’t show more anyway).');
+            banner((item.name||'a clip')+' keeps stalling — this machine is likely at its hardware video-decode limit. Several high-res clips at once? Re-encode them to 1080p (the projector can’t show more anyway). If it stays frozen, reload this tab (Ctrl+R).');
           }
         } else {
           item._stall=0;
@@ -343,16 +553,147 @@ bc.onmessage = (ev)=>{
     stageW = st.stageW; stageH = st.stageH;
     showOutlines = st.outlines;
     surfaceList = st.surfaces;
+    // Stamp each surface's geometry key ONCE per state message. drawGL used to
+    // recompute JSON.stringify(s.pts) per surface EVERY FRAME just to decide
+    // whether to rebuild the VBO — in the tab whose whole job is holding 60fps
+    // with several 4K streams. Geometry only ever changes via this message, so
+    // computing it here is both exact and ~60x cheaper. (Keyed on pts alone, so
+    // an opacity or blend change still reuses the existing mesh.)
+    for(const s of surfaceList) s._geoKey = s.rows+'x'+s.cols+'|'+JSON.stringify(s.pts);
     // drop media for surfaces that no longer exist; sync playlists for the rest
     const ids = new Set(surfaceList.map(s=>s.id));
     for(const id of [...mediaMap.keys()]) if(!ids.has(id)) clearMedia(id);
     for(const s of surfaceList) if(s.pl) syncPl(s.id, s.pl);
     if(!gotState){ gotState=true; document.getElementById('waiting').classList.add('hidden'); }
   }
-  else if(d.type==='pl-item') addItemBlob(d.surfId, d.itemId, d.name, new Blob([d.buf], {type:d.mime||''}));
+  // Chunked transfer (see 10-sync.js). Parts are collected and only turned
+  // into a Blob at pl-end — a Blob assembled this way can be backed by disk,
+  // unlike the single giant ArrayBuffer this replaced, and it is still fully
+  // materialised in THIS tab, which is what NOTES §2 required.
+  else if(d.type==='pl-begin'){
+    incoming.set(d.itemId, {surfId:d.surfId, xfer:d.xfer, name:d.name, mime:d.mime||'',
+                            size:d.size||0, got:0, backend:'?'});
+    // Large clips stream to disk (OPFS); small ones stay in memory. begin() is
+    // async, but write() queues internally, so chunks arriving before it
+    // resolves are still ordered correctly.
+    DiskStore.begin(d.itemId, {name:d.name, mime:d.mime, size:d.size})
+      .then(backend=>{ const i=incoming.get(d.itemId); if(i) i.backend=backend; })
+      .catch(()=>{});
+    updateHud();
+  }
+  else if(d.type==='pl-chunk'){
+    const inc=incoming.get(d.itemId);
+    // Only chunks belonging to the transfer that opened this entry. Two
+    // overlapping transfers of the same clip used to append into one buffer,
+    // producing a payload LARGER than the file and an undecodable "codec" error.
+    if(inc && inc.xfer===d.xfer){ DiskStore.write(d.itemId, d.buf); inc.got+=(d.buf&&d.buf.byteLength)||0; updateHud(); }
+  }
+  else if(d.type==='pl-end'){
+    const inc=incoming.get(d.itemId);
+    if(inc && inc.xfer===d.xfer){
+      incoming.delete(d.itemId);
+      DiskStore.finish(d.itemId).then(res=>{
+        if(!res) return;
+        // Trust the declared size: a short or long reassembly means something
+        // went wrong upstream, and corrupt media is worse than none.
+        if(inc.size && res.size!==inc.size){
+          console.error('[THROW] size mismatch', {declared:inc.size, got:res.size, backend:res.backend});
+          DiskStore.release(d.itemId);
+          banner('“'+(inc.name||'a clip')+'” arrived incomplete ('+res.size+' of '+inc.size+' bytes) — it will be requested again');
+          return;
+        }
+        if(res.backend==='blob' && _heldBytes + res.size > MEM_BUDGET){
+          banner('This tab is holding '+GB(_heldBytes+res.size)+' of video in memory — past about '+GB(MEM_BUDGET)+' the browser stops serving clips for playback',
+                 'clips under '+MB(DiskStore.SMALL)+' are kept in memory, so a lot of small ones add up; ⤓ Downscale the big ones');
+        }
+        // RETURNED, so the .catch below actually covers it. Left dangling, an
+        // addItemBlob rejection escaped the chain entirely and — with no
+        // unhandledrejection handler on this page — vanished without trace,
+        // taking the retry-in-memory recovery with it.
+        return addItemBlob(inc.surfId, d.itemId, inc.name, res.file, res.backend, res.name);
+      }).catch(err=>{
+        console.error('[THROW] store failed', err && (err.name+': '+err.message));
+        // Do NOT give up on the clip. Mark disk unusable for it and release the
+        // partial file; the missing-item sweep re-requests it and the retry
+        // goes to memory, which either works or fails with an honest message.
+        DiskStore.markNoDisk(d.itemId);
+        DiskStore.release(d.itemId);
+        const quota = err && err.name === 'QuotaExceededError';
+        banner(quota ? '“'+(inc.name||'a clip')+'” did not fit in this browser’s storage — retrying in memory'
+                     : 'Couldn’t store “'+(inc.name||'a clip')+'” for playback',
+               quota ? 'private/incognito windows get a much smaller allowance; a normal window has far more room'
+                     : (err && err.message));
+      }).then(updateHud);
+      updateHud();
+    }
+  }
+  else if(d.type==='pl-abort'){
+    const inc=incoming.get(d.itemId);
+    if(inc && (d.xfer===undefined || inc.xfer===d.xfer)){
+      incoming.delete(d.itemId);
+      DiskStore.release(d.itemId);
+    }
+    updateHud();
+  }
   else if(d.type==='pl-src')  addItemSrc(d.surfId, d.itemId, d.src, d.name);
+  // Roll-call between display tabs. Answering is unconditional and cheap; a
+  // tab that does not answer is one that is not running, and only then is its
+  // storage reclaimed.
+  else if(d.type==='display-alive?'){
+    if(d.from && d.from!==DiskStore.session) _aliveSessions.add(d.from);
+    try{ bc.postMessage({type:'display-alive', from: DiskStore.session}); }catch(_){}
+  }
+  else if(d.type==='display-alive'){
+    if(d.from && d.from!==DiskStore.session) _aliveSessions.add(d.from);
+  }
+  else if(d.type==='hello-editor'){
+    // The editor (re)loaded after this tab was already open. It missed our
+    // one-shot greeting below, so answer its roll-call: without this the
+    // editor's ⧉ Display button never lights up and it never force-sends
+    // media to a display it doesn't know is listening.
+    try{ bc.postMessage({type:'hello-display'}); }catch(_){}
+  }
   else if(d.type==='editor-bye'){ /* editor closed; keep last frame */ }
 };
+// Reclaim OPFS files left by a crashed or force-closed session (their owning
+// itemIds are gone, so nothing else will ever free them), then size the budget
+// from the real quota before any media arrives.
+// Reclaiming storage from a crashed session is necessary — nothing else will
+// ever free it. But a LIVE second display tab's storage looks exactly the same
+// from here, and the previous version deleted it: opening a second tab wiped
+// the media the first one was projecting, mid-show. OPFS is per-ORIGIN, not
+// per-tab, so "clean up everything that isn't mine" is simply wrong.
+//
+// Instead, ask. Every display tab answers a roll-call with its session id over
+// the channel that already exists, so a directory is only reclaimed when
+// nobody speaks for it. A crashed session cannot answer; a live one always
+// will. The wait is generous because being slow here costs nothing, while
+// being wrong deletes someone's show.
+setTimeout(()=>{
+  DiskStore.purgeStale(_aliveSessions)
+    .then(n=>{ if(n) console.info('[THROW] reclaimed '+n+' media folder(s) from ended session(s)'); })
+    .then(refreshBudget)
+    .then(paintMeter)
+    .catch(()=>{});
+}, 900);
+try{ bc.postMessage({type:'display-alive?', from: DiskStore.session}); }catch(_){}
+
+// Best-effort tidy on a clean close. Never fires on a crash, which is exactly
+// when it would matter — hence the roll-call above being the real reclaim.
+//
+// persisted:true means the page is going into the back/forward cache and can
+// come BACK, with all of its JavaScript state intact — including a mediaMap
+// full of items pointing at files. Deleting them there would restore a tab
+// that believes it still has media it no longer has, and the projection would
+// break with nothing to explain it. Only tidy up on an actual teardown.
+window.addEventListener('pagehide', (e)=>{
+  if(e.persisted) return;
+  try{ DiskStore.purgeSelf(); }catch(_){}
+});
+
+refreshBudget().then(paintMeter).catch(()=>{});
+setInterval(()=>{ refreshBudget().then(paintMeter).catch(()=>{}); }, 15000);
+
 // announce ourselves — the editor answers with full state + media
 bc.postMessage({type:'hello-display'});
 
@@ -541,7 +882,7 @@ function drawGL(){
     if(!M) continue;
 
     // build the mesh once (shared by all passes)
-    const key=s.rows+'x'+s.cols+'|'+JSON.stringify(s.pts);
+    const key=s._geoKey || (s.rows+'x'+s.cols+'|'+JSON.stringify(s.pts));
     let msh=glMesh.get(s.id);
     if(!msh){ msh={vbo:gl.createBuffer(), count:0, key:null}; glMesh.set(s.id,msh); }
     if(msh.key!==key){
@@ -660,12 +1001,17 @@ function drawOverlay(){
 
 // ── Render loop (this tab drives itself) ──────────────────────────
 function fit(){
-  // GL canvas renders at devicePixelRatio for pixel-exact fullscreen output;
-  // the 2D fallback and overlay stay at CSS pixels (their previous behaviour).
+  // ALL THREE canvases render at devicePixelRatio. The GL canvas always did;
+  // the Canvas2D fallback and the overlay did not, so on a HiDPI screen the
+  // calibration outlines and placeholders were visibly softer than the media
+  // they are meant to be aligned against — the one job they have. draw2D and
+  // drawOverlay derive their scale from the canvas dimensions, so they need no
+  // other change. (On a typical 1:1 projector dpr is 1 and nothing changes.)
   const dpr=Math.max(1, window.devicePixelRatio||1);
-  oc.width=Math.round(window.innerWidth*dpr); oc.height=Math.round(window.innerHeight*dpr);
-  oc2d.width=window.innerWidth; oc2d.height=window.innerHeight;
-  ov.width=window.innerWidth;   ov.height=window.innerHeight;
+  const w=Math.round(window.innerWidth*dpr), h=Math.round(window.innerHeight*dpr);
+  oc.width=w;   oc.height=h;
+  oc2d.width=w; oc2d.height=h;
+  ov.width=w;   ov.height=h;
 }
 window.addEventListener('resize', fit);
 fit();
@@ -699,6 +1045,20 @@ Object.defineProperty(window,'surfaceList',{get:()=>surfaceList});
 Object.defineProperty(window,'mediaCount',{get:()=>[...mediaMap.values()].filter(M=>M.order.length>0).length});
 Object.defineProperty(window,'stageSize',{get:()=>({w:stageW,h:stageH})});
 Object.defineProperty(window,'glActive',{get:()=>hasGL});
+// Test hook: evict a surface's blobs while leaving its playlist order intact —
+// the shape of a real loss (pruned item revived by undo, or a dropped message).
+window.__evict=(id)=>{
+  const M=mediaMap.get(id); if(!M) return 0;
+  const n=M.store.size;
+  for(const it of M.store.values()) disposeItem(it);
+  M.store.clear(); M.cur=null; M.nxt=null;
+  if(M._missing) M._missing.clear();
+  if(M._asked) M._asked.clear();
+  return n;
+};
+Object.defineProperty(window,'_aliveSessions',{get:()=>_aliveSessions});
+window.__setMemBudget=(n)=>{ MEM_BUDGET=n; };
+Object.defineProperty(window,'_heldBytes',{get:()=>_heldBytes});
 window.plState=(id)=>{
   const M=mediaMap.get(id);
   return M ? {order:[...M.order], cur:M.cur, nxt:M.nxt, transition:M.cfg.transition,

@@ -1,6 +1,6 @@
 # THROW — Test Checklist
 
-Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON round-trips, and editor↔display sync (`npm test`). The items below need a real browser session and real hardware.
+Automated Playwright tests (45) cover interaction, presets, thumbnails, JSON round-trips, editor↔display sync, warp-cache invalidation, and surface-id uniqueness (`npm test`). The items below need a real browser session and real hardware.
 
 **Important:** test video playback in a browser you launched yourself (via `start.bat`), NOT one launched by automation — Playwright's flags disable the exact media-suspension behaviours that broke earlier designs (NOTES.md §2).
 
@@ -9,6 +9,7 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 ## Setup
 
 - [ ] Double-click `start.bat` — server starts minimized, editor opens at `http://localhost:8420/THROW.html`
+- [ ] On a PC with **no Python installed**, `start.bat` falls through to Node — and with neither, it prints the install guidance instead of opening a dead tab (`where python` resolves the Microsoft Store stub, so detection must *run* the interpreter, not just resolve the name)
 - [ ] DevTools console (F12): **zero errors on load**
 - [ ] Layout reads as: toolbar on top · SURFACES rail left · stage centre · INSPECTOR rail right · status bar bottom
 - [ ] Stage stays centred in its column at any window size; the toast never collides with the corner/inner/move legend
@@ -20,6 +21,10 @@ Automated Playwright tests (12) cover interaction, presets, thumbnails, JSON rou
 - [ ] Add a surface in the editor — it appears in the display within a frame
 - [ ] Drag corners/body in the editor — display updates live
 - [ ] Click **⛶ FULLSCREEN** in the display — HUD and cursor hide; Esc restores them
+- [ ] TWO display tabs open at once: neither loses media, and the storage meter is sane in both
+- [ ] Storage meter in the status bar shows clip count and total size; it warns past ~10 video surfaces or 3+ over-1080p clips, and never refuses anything
+- [ ] A multi-GB clip loads and plays (streams to disk, not memory) — `npm run test:media` with a large capture
+- [ ] Outlines are OFF on a fresh start — the projection shows media alone, no green boundary or centre cross
 - [ ] `O` toggles outlines in both tabs
 
 ## 2 · Video (the historically broken path — test thoroughly)

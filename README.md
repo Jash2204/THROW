@@ -2,7 +2,7 @@
 
 **Tiled Homographic Rendering Onto Walls** — a zero-install projection mapper that runs in your browser.
 
-Warp images and looping videos onto walls, ceilings, boxes, or any awkward real-world surface. Edit on your laptop screen while the projector shows the result live — no accounts, no cloud, no install beyond Python.
+Warp images and looping videos onto walls, ceilings, boxes, or any awkward real-world surface. Edit on your laptop screen while the projector shows the result live — no accounts, no cloud, no install beyond a script runtime you probably already have.
 
 ---
 
@@ -14,7 +14,7 @@ Warp images and looping videos onto walls, ceilings, boxes, or any awkward real-
 4. Click **`⧉ Display`** (top-right of the toolbar) — a second tab opens. Drag it onto the projector (display set to **Extend**), click **⛶ FULLSCREEN**.
 5. Calibrate from the editor. Everything syncs live — the projected picture never shifts once you've aligned it.
 
-Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome/Edge). No other dependencies, no build step.
+Requires **Python or Node** (either one, for the tiny local server) and a Chromium browser (Chrome/Edge). `start.bat` finds whichever you have; if neither is installed it says so and links both. No other dependencies, no build step.
 
 > Why a server? The editor and display are two tabs that talk over `BroadcastChannel`, which requires a shared origin — `localhost` provides it, `file://` cannot. You can still open `THROW.html` directly from disk to edit, but the Display tab needs `start.bat`.
 
@@ -59,7 +59,7 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 - **Scale** — resize the selected surface about its centre without touching the warp. The dial is relative to selection time, so dragging back to 100% exactly undoes it.
 - **Layers** with per-surface blend modes (Screen/Add make black project as transparent) and opacity.
 - **Image adjustments** — brightness, contrast, saturation, hue, and horizontal/vertical flip, per playlist item. The editor previews via CSS canvas filters; the display applies the same math in its WebGL shader. Colour never re-warps (composite-time) and flips are a shader uniform, so one mesh serves every item.
-- **Outlines** (`O`) — project each surface's footprint to line up against real-world edges before the media is final.
+- **Outlines** (`O`) — project each surface's footprint (boundary, grid, corner dots, centre cross) to line up against real-world edges. **Off by default**: they are alignment aids, not decoration, so a fresh projection shows only your media. Press `O` while calibrating, press it again to go clean.
 - **Stage presets** — FHD/4K/QHD/HD/WXGA/XGA or custom, remembered across sessions. Match your projector's native resolution for 1:1 pixels in fullscreen.
 - **Off-stage freedom** — surfaces can hang off or sit fully outside the stage (simply not projected). `C` rescues a lost surface.
 - **Save / load** (toolbar) — projects export to `.throw.json` with embedded images (videos re-drop after loading). Imports are schema-validated; a malicious file can't inject anything.
@@ -109,14 +109,21 @@ Requires **Python** (for the 2-line local server) and a Chromium browser (Chrome
 
 ```
 start.bat         ← double-click me (serves app/ + opens the editor)
+serve.js          ← Node fallback server, used when Python isn’t installed
 app/
-├── THROW.html    ← editor tab
+├── THROW.html    ← editor tab (markup + styles; loads editor/ in order)
+├── editor/       ← the editor, in ordered classic scripts (00… → 90…)
 ├── display.html  ← projector tab (opened by the ⧉ Display button)
+├── display-storage.js ← disk-backed media store for the display (OPFS)
 └── shared.js     ← warp math + media helpers used by both
 docs/
 ├── NOTES.md      ← engineering decisions log — why it is built this way
 └── TESTING.md    ← manual test checklist
-tests/            ← Playwright suite
+tests/
+├── interaction.spec.js ← the Playwright suite (npm test)
+├── smoke-session.js    ← one long editing session end to end (npm run smoke)
+├── real-media.js       ← drives the two-tab flow with YOUR real clips
+└── storage-probe.js    ← measures this machine’s storage limits
 ```
 
 The warp core: each surface is a grid of control points; media is texture-mapped across it with affine triangles (subdivided so bends stay smooth), rendered to an offscreen buffer and composited once per surface so blend modes never double-apply. The display warps on the GPU (WebGL, one texture upload per video per frame); sampling a `<video>` per-triangle stalls Chrome's decoder, and Blob handles stall it across tabs — both found the hard way; the full story is in [NOTES.md](docs/NOTES.md).
@@ -136,6 +143,16 @@ npm install
 npx playwright install chromium
 npm test
 ```
+
+`npm run test:media` drives the real two-tab flow with your own video files
+(`MEDIA_DIR="D:/clips" npm run test:media 6`), in your installed Chrome rather
+than the bundled Chromium — the bundled build has no HEVC, which most screen
+captures use. `npm run test:storage` reports this machine’s actual storage
+quota and blob ceiling.
+
+`npm run smoke` additionally drives one long editing session end to end — add,
+warp, media, playlist, per-item look, crop, copy, trace, save, clear, reload,
+delete — and fails on any uncaught error along the way.
 
 Automated tests cover interaction, state isolation, presets, thumbnails, JSON validation, and editor↔display sync. Hardware-dependent paths (projector fullscreen, real-codec playback) are in [TESTING.md](docs/TESTING.md) — test those in a normally-launched browser, not an automated one (automation flags change media behaviour; see NOTES §2).
 
